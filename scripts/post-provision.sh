@@ -60,7 +60,7 @@ RUNBOOK=$(cat <<'RUNBOOK_EOF'
 # Zava Application Runbook
 
 ## Overview
-Zava is a Python Flask e-commerce app for pet products, deployed on Azure Container Apps (ACA).
+Zava is a .NET e-commerce app for pet products, deployed on Azure Container Apps (ACA).
 
 ## Intentional memory bug: AVeryMemoryIntensiveFunction
 Every HTTP request to the catalog, basket, or add-to-basket routes triggers
@@ -87,7 +87,7 @@ az containerapp update \
   --max-replicas 4
 ```
 This does **not** fix the leak; it buys time. The permanent fix is to remove
-the call to `AVeryMemoryIntensiveFunction` in `src/web/app.py`.
+the call to `AVeryMemoryIntensiveFunction` in `src/backend/Program.cs`.
 
 ## Escalation
 Open a GitHub issue in the repository with:

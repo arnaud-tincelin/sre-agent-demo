@@ -36,7 +36,7 @@ Action Group  ──►  Azure SRE Agent  (Microsoft.App/agents)
 | Path | Purpose |
 |------|---------|
 | `infra/main.bicep` | Log Analytics, Container Apps environment, Zava Backend + Frontend Container Apps, managed identity + RBAC, Azure SRE Agent (`Microsoft.App/agents`), metric alert |
-| `src/backend/` | Zava .NET 8 minimal API – catalog endpoint with `AVeryMemoryIntensiveFunction` memory leak |
+| `src/backend/` | Zava .NET 10 minimal API – catalog endpoint with `AVeryMemoryIntensiveFunction` memory leak |
 | `src/frontend/` | React + Vite SPA – navigates catalog/basket, triggers the backend leak on every page load |
 | `scripts/post-provision.sh` | Calls the SRE Agent data-plane API to upload the runbook, create the subagent, and create the response plan |
 | `azure.yaml` | azd configuration – provisions infra then runs `post-provision.sh` |
@@ -86,5 +86,5 @@ cd src/frontend && npm install && npm run dev
 
 - `GITHUB_PAT` is passed to Bicep as a secure parameter and stored in the SRE Agent as a GitHub connector credential. It is never written to disk or logged.
 - The `Microsoft.App/agents` resource type is in **public preview**. The exact Bicep API version and property schema should be verified against current preview documentation.
-- The permanent fix for the memory leak is to remove the `AVeryMemoryIntensiveFunction` call in `src/web/app.py`; the SRE Agent mitigation (scaling replicas) only buys time.
+- The permanent fix for the memory leak is to remove the `AVeryMemoryIntensiveFunction` call in `src/backend/Program.cs`; the SRE Agent mitigation (scaling replicas) only buys time.
 
