@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
-issue_already_opened = False
+LOGGER = logging.getLogger("sre-agent")
 
 
 def _token(scope: str) -> str:
@@ -80,16 +81,30 @@ def scale_container_app() -> None:
 
 
 def open_issue() -> None:
-    global issue_already_opened
-
-    if issue_already_opened:
-        return
-
     if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
         print("GitHub configuration is missing; issue creation skipped.")
         return
 
     title = "[SRE Agent] OOM in AVeryMemoryIntensiveFunction mitigated by ACA scale-out"
+    issues_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/issues"
+    headers = {
+        "Authorization": "Bearer " + GITHUB_TOKEN,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    existing = requests.get(
+        issues_url,
+        headers=headers,
+        params={"state": "open", "labels": "sre-agent", "per_page": 100},
+        timeout=30,
+    )
+    existing.raise_for_status()
+    for issue in existing.json():
+        if issue.get("title") == title:
+            print(f"GitHub issue already exists: #{issue.get('number')}")
+            return
+
     body = (
         "The Azure SRE agent detected OOM symptoms while navigating Zava and identified "
         "`AVeryMemoryIntensiveFunction` as the likely root cause.\n\n"
@@ -100,30 +115,26 @@ def open_issue() -> None:
     )
 
     response = requests.post(
-        f"https://api.github.com/repos/{GITHUB_REPOSITORY}/issues",
-        headers={
-            "Authorization": "Bearer " + GITHUB_TOKEN,
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        issues_url,
+        headers=headers,
         json={"title": title, "body": body, "labels": ["bug", "sre-agent"]},
         timeout=30,
     )
     response.raise_for_status()
     issue_number = response.json().get("number")
     print(f"Opened GitHub issue #{issue_number}.")
-    issue_already_opened = True
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
     print("Azure SRE Agent demo started")
     while True:
         try:
             if detect_issue():
                 scale_container_app()
                 open_issue()
-        except Exception as exc:  # demo resiliency
-            print(f"SRE agent loop error: {exc}")
+        except (requests.RequestException, ValueError, RuntimeError):
+            LOGGER.exception("SRE agent loop error")
 
         time.sleep(POLL_INTERVAL_SECONDS)
 

@@ -31,13 +31,23 @@ if [ -z "$PRINCIPAL_ID" ]; then
 fi
 
 echo "Assigning Contributor role so the SRE agent can scale ACA..."
-az role assignment create \
+CONTRIBUTOR_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG"
+CONTRIBUTOR_EXISTS=$(az role assignment list \
   --subscription "$SUBSCRIPTION_ID" \
   --assignee-object-id "$PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
+  --scope "$CONTRIBUTOR_SCOPE" \
   --role "Contributor" \
-  --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG" \
-  --only-show-errors >/dev/null || true
+  --query "length(@)" -o tsv)
+
+if [ "$CONTRIBUTOR_EXISTS" = "0" ]; then
+  az role assignment create \
+    --subscription "$SUBSCRIPTION_ID" \
+    --assignee-object-id "$PRINCIPAL_ID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "Contributor" \
+    --scope "$CONTRIBUTOR_SCOPE" \
+    --only-show-errors >/dev/null
+fi
 
 WORKSPACE_ID=$(az monitor log-analytics workspace show \
   --subscription "$SUBSCRIPTION_ID" \
@@ -47,13 +57,22 @@ WORKSPACE_ID=$(az monitor log-analytics workspace show \
 
 if [ -n "$WORKSPACE_ID" ]; then
   echo "Assigning Log Analytics Reader role so the SRE agent can query logs..."
-  az role assignment create \
+  LOG_READER_EXISTS=$(az role assignment list \
     --subscription "$SUBSCRIPTION_ID" \
     --assignee-object-id "$PRINCIPAL_ID" \
-    --assignee-principal-type ServicePrincipal \
-    --role "Log Analytics Reader" \
     --scope "$WORKSPACE_ID" \
-    --only-show-errors >/dev/null || true
+    --role "Log Analytics Reader" \
+    --query "length(@)" -o tsv)
+
+  if [ "$LOG_READER_EXISTS" = "0" ]; then
+    az role assignment create \
+      --subscription "$SUBSCRIPTION_ID" \
+      --assignee-object-id "$PRINCIPAL_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "Log Analytics Reader" \
+      --scope "$WORKSPACE_ID" \
+      --only-show-errors >/dev/null
+  fi
 fi
 
 echo "SRE agent identity configuration completed."

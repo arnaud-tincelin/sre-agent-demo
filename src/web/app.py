@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from flask import Flask, redirect, render_template_string, request, session, url_for
+import os
+
+from flask import Flask, Response, redirect, render_template_string, request, session, url_for
 
 app = Flask(__name__)
-app.secret_key = "zava-demo-secret"
+app.secret_key = os.getenv("SECRET_KEY", os.urandom(24).hex())
 
 CATALOG = [
     {"id": "1", "name": "Dog food", "price": 29.99},
@@ -52,7 +54,7 @@ def index() -> str:
 
 
 @app.post("/basket/add/<item_id>")
-def add_to_basket(item_id: str):
+def add_to_basket(item_id: str) -> Response:
     basket = session.get("basket", {})
     basket[item_id] = basket.get(item_id, 0) + 1
     session["basket"] = basket
