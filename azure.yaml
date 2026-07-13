@@ -9,3 +9,7 @@ services:
     host: containerapp
     language: python
 
+hooks:
+  postprovision:
+    shell: sh
+    run: ./scripts/post-provision.sh
