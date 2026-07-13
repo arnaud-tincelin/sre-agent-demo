@@ -1,0 +1,20 @@
+server {
+    listen 80;
+    server_name _;
+
+    # Proxy API calls to the .NET backend.
+    # BACKEND_URL is substituted at container startup via envsubst.
+    location /api/ {
+        proxy_pass ${BACKEND_URL};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Serve the React SPA for all other paths.
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ /index.html;
+    }
+}
