@@ -2,13 +2,13 @@
   "name": "SRE Agent Demo",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
   "features": {
-    "ghcr.io/devcontainers/features/dotnet:2": {
+    "ghcr.io/devcontainers/features/dotnet:latest": {
       "version": "8.0"
     },
-    "ghcr.io/devcontainers/features/node:1": {
+    "ghcr.io/devcontainers/features/node:latest": {
       "version": "20"
     },
-    "ghcr.io/devcontainers/features/azure-cli:1": {},
+    "ghcr.io/devcontainers/features/azure-cli:latest": {},
     "ghcr.io/azure/azure-dev/azd:latest": {}
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
