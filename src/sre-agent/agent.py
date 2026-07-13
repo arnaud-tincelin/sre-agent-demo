@@ -130,11 +130,21 @@ def main() -> None:
     print("Azure SRE Agent demo started")
     while True:
         try:
-            if detect_issue():
-                scale_container_app()
-                open_issue()
+            detected = detect_issue()
         except (requests.RequestException, ValueError, RuntimeError):
-            LOGGER.exception("SRE agent loop error")
+            LOGGER.exception("Detection step failed")
+            detected = False
+
+        if detected:
+            try:
+                scale_container_app()
+            except (requests.RequestException, ValueError, RuntimeError):
+                LOGGER.exception("Mitigation step failed while scaling ACA")
+
+            try:
+                open_issue()
+            except (requests.RequestException, ValueError, RuntimeError):
+                LOGGER.exception("GitHub issue step failed")
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
