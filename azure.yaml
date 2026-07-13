@@ -1,0 +1,29 @@
+name: sre-agent-demo
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  zava-web:
+    project: src/web
+    host: containerapp
+    language: python
+
+  sre-agent:
+    project: src/sre-agent
+    host: containerapp
+    language: python
+    env:
+      TARGET_CONTAINER_APP: zava-web
+      RESOURCE_GROUP: ${AZURE_RESOURCE_GROUP}
+      SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID}
+      LOG_ANALYTICS_WORKSPACE_ID: ${LOG_ANALYTICS_WORKSPACE_ID}
+      GITHUB_REPOSITORY: arnaud-tincelin/sre-agent-demo
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      TARGET_MAX_REPLICAS: 4
+      POLL_INTERVAL_SECONDS: 60
+
+hooks:
+  postdeploy:
+    shell: sh
+    run: ./scripts/configure-agent-identity.sh
