@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>backend</AssemblyName>
+    <UserSecretsId>bbf0ac97-2bc3-4232-823d-e6da9482af2e</UserSecretsId>
+    <!-- Ship symbols in the Release container so exception stack traces carry file:line
+         for the SRE Agent's root-cause analysis. -->
+    <DebugType>portable</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.AspNetCore" Version="1.5.0" />
+  </ItemGroup>
+</Project>
