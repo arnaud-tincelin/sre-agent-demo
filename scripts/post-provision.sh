@@ -72,7 +72,7 @@ eventually produces container OOM kills.
 ERROR level. Query in Log Analytics:
 ```kusto
 ContainerAppConsoleLogs_CL
-| where ContainerName_s == "zava"
+| where ContainerName_s == "zava-backend"
 | where Log_s has "AVeryMemoryIntensiveFunction"
 | order by TimeGenerated desc
 ```
@@ -112,7 +112,7 @@ SUBAGENT_INSTRUCTIONS="You are an SRE incident responder for the Zava e-commerce
 When you receive an Azure Monitor OOM or high-memory alert for the Zava Container App:
 
 1. **Diagnose** – Query Log Analytics for recent AVeryMemoryIntensiveFunction entries:
-   ContainerAppConsoleLogs_CL | where Log_s has \"AVeryMemoryIntensiveFunction\" | order by TimeGenerated desc | take 20
+   ContainerAppConsoleLogs_CL | where ContainerName_s == \"zava-backend\" | where Log_s has \"AVeryMemoryIntensiveFunction\" | order by TimeGenerated desc | take 20
 
 2. **Identify root cause** – Confirm that AVeryMemoryIntensiveFunction is the source of
    the memory pressure (look for rapidly increasing leak size values in the logs).

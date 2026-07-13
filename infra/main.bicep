@@ -14,7 +14,8 @@ param githubPat string = ''
 // ── Names ────────────────────────────────────────────────────────────────────
 var logAnalyticsWorkspaceName    = 'law-${environmentName}'
 var containerAppsEnvironmentName = 'cae-${environmentName}'
-var zavaContainerAppName         = 'ca-zava-${environmentName}'
+var zavaBackendAppName           = 'ca-zava-backend-${environmentName}'
+var zavaFrontendAppName          = 'ca-zava-frontend-${environmentName}'
 var sreAgentName                 = 'sre-agent-${environmentName}'
 var sreAgentIdentityName         = 'id-sre-agent-${environmentName}'
 var actionGroupName              = 'ag-sre-agent-${environmentName}'
@@ -52,23 +53,24 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   }
 }
 
-// ── Zava Container App ───────────────────────────────────────────────────────
-// azd replaces the placeholder image with the built src/web image on deploy.
-resource zavaContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: zavaContainerAppName
+// ── Zava Backend Container App ────────────────────────────────────────────────
+// Internal ingress only – reachable from within the ACA environment.
+// azd replaces the placeholder image with the built src/backend image on deploy.
+resource zavaBackendApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: zavaBackendAppName
   location: location
   properties: {
     environmentId: containerAppsEnvironment.id
     configuration: {
       ingress: {
-        external: true
-        targetPort: 8000
+        external: false  // internal – only reachable by the frontend nginx proxy
+        targetPort: 8080
       }
     }
     template: {
       containers: [
         {
-          name: 'zava'
+          name: 'zava-backend'
           image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: {
             cpu: json('0.5')
@@ -79,6 +81,47 @@ resource zavaContainerApp 'Microsoft.App/containerApps@2024-03-01' = {
       scale: {
         minReplicas: 1
         maxReplicas: 4
+      }
+    }
+  }
+}
+
+// ── Zava Frontend Container App ───────────────────────────────────────────────
+// External ingress – serves the React SPA to end users.
+// nginx proxies /api/* to the backend using BACKEND_URL at runtime.
+// azd replaces the placeholder image with the built src/frontend image on deploy.
+resource zavaFrontendApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: zavaFrontendAppName
+  location: location
+  properties: {
+    environmentId: containerAppsEnvironment.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 80
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'zava-frontend'
+          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+          resources: {
+            cpu: json('0.25')
+            memory: '0.5Gi'
+          }
+          env: [
+            {
+              name: 'BACKEND_URL'
+              // ACA internal FQDN – reachable within the environment
+              value: 'https://${zavaBackendApp.properties.configuration.ingress.fqdn}'
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 2
       }
     }
   }
@@ -180,7 +223,7 @@ resource zavaMemoryAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
     description: 'Zava Container App memory > 800 MiB – AVeryMemoryIntensiveFunction OOM pressure detected.'
     severity: 2
     enabled: true
-    scopes: [zavaContainerApp.id]
+    scopes: [zavaBackendApp.id]
     evaluationFrequency: 'PT1M'
     windowSize: 'PT5M'
     criteria: {
@@ -210,6 +253,7 @@ output AZURE_CONTAINER_APPS_ENVIRONMENT_ID string = containerAppsEnvironment.id
 output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerAppsEnvironment.name
 output LOG_ANALYTICS_WORKSPACE_ID string = logAnalyticsWorkspace.properties.customerId
 output LOG_ANALYTICS_RESOURCE_ID string = logAnalyticsWorkspace.id
-// SERVICE_ZAVA_WEB_NAME tells azd which container app to update with the built image
-output SERVICE_ZAVA_WEB_NAME string = zavaContainerApp.name
+// SERVICE_*_NAME outputs tell azd which container app to update with each built image.
+output SERVICE_ZAVA_BACKEND_NAME string = zavaBackendApp.name
+output SERVICE_ZAVA_FRONTEND_NAME string = zavaFrontendApp.name
 output SRE_AGENT_NAME string = sreAgent.name

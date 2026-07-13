@@ -35,8 +35,9 @@ Action Group  ──►  Azure SRE Agent  (Microsoft.App/agents)
 
 | Path | Purpose |
 |------|---------|
-| `infra/main.bicep` | Log Analytics, Container Apps environment, Zava Container App, managed identity + RBAC, Azure SRE Agent (`Microsoft.App/agents`), metric alert |
-| `src/web/` | Zava Flask app with the intentional `AVeryMemoryIntensiveFunction` memory bug |
+| `infra/main.bicep` | Log Analytics, Container Apps environment, Zava Backend + Frontend Container Apps, managed identity + RBAC, Azure SRE Agent (`Microsoft.App/agents`), metric alert |
+| `src/backend/` | Zava .NET 8 minimal API – catalog endpoint with `AVeryMemoryIntensiveFunction` memory leak |
+| `src/frontend/` | React + Vite SPA – navigates catalog/basket, triggers the backend leak on every page load |
 | `scripts/post-provision.sh` | Calls the SRE Agent data-plane API to upload the runbook, create the subagent, and create the response plan |
 | `azure.yaml` | azd configuration – provisions infra then runs `post-provision.sh` |
 
@@ -63,6 +64,16 @@ azd up
 1. Run `infra/main.bicep` → creates all Azure resources including the SRE Agent.
 2. Build and push the Zava container image, update the Container App.
 3. Run `scripts/post-provision.sh` → configures the agent knowledge base, subagent, and response plan.
+
+## Local development
+
+```bash
+# Terminal 1 – .NET backend on :8080
+cd src/backend && dotnet run
+
+# Terminal 2 – React dev server on :5173 (proxies /api/* to :8080)
+cd src/frontend && npm install && npm run dev
+```
 
 ## Triggering the demo
 

@@ -4,10 +4,15 @@ infra:
   path: infra
 
 services:
-  zava-web:
-    project: src/web
+  zava-backend:
+    project: src/backend
     host: containerapp
-    language: python
+    language: dotnet
+
+  zava-frontend:
+    project: src/frontend
+    host: containerapp
+    language: js
 
 hooks:
   postprovision:
