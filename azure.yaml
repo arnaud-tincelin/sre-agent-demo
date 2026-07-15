@@ -25,6 +25,10 @@ services:
       remoteBuild: true
 
 hooks:
+  preprovision:
+    shell: sh
+    run: ./scripts/pre-provision.sh
+    interactive: true
   postprovision:
     shell: sh
     run: ./scripts/post-provision.sh

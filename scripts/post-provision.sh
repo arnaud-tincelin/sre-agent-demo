@@ -33,8 +33,8 @@ echo "==> Configuring SRE Agent: ${AGENT_NAME}"
 # The agent endpoint is the base URL for all data-plane API calls.
 AGENT_ENDPOINT=$(az rest \
   --method GET \
-  --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RG}/providers/Microsoft.App/agents/${AGENT_NAME}?api-version=2025-02-02-preview" \
-  --query "properties.endpoint" \
+  --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RG}/providers/Microsoft.App/agents/${AGENT_NAME}?api-version=2025-05-01-preview" \
+  --query "properties.agentEndpoint" \
   --output tsv 2>/dev/null || true)
 
 if [ -z "${AGENT_ENDPOINT}" ]; then
@@ -46,12 +46,13 @@ fi
 echo "  Agent endpoint: ${AGENT_ENDPOINT}"
 
 # ── Acquire access token ──────────────────────────────────────────────────────
+# Data-plane calls require a token scoped to the SRE Agent data-plane audience.
 TOKEN=$(az account get-access-token \
-  --resource "https://agents.azure.com" \
+  --resource "https://azuresre.dev" \
   --query accessToken \
   --output tsv)
 
-AUTH_HEADER="Authorization: ******"
+AUTH_HEADER="Authorization: Bearer ${TOKEN}"
 
 # ── 1. Upload runbook (knowledge-base document) ───────────────────────────────
 echo "==> Uploading Zava runbook to knowledge base..."
@@ -69,11 +70,30 @@ Every HTTP request to the catalog, basket, or add-to-basket routes triggers
 eventually produces container OOM kills.
 
 **Log marker:** The app emits `AVeryMemoryIntensiveFunction leak size=<N>` at
-ERROR level. Query in Log Analytics:
+ERROR level. It is available from two log sources:
+
+1. **Container console logs** (Log Analytics `ContainerAppConsoleLogs_CL`):
 ```kusto
 ContainerAppConsoleLogs_CL
 | where ContainerName_s == "zava-backend"
 | where Log_s has "AVeryMemoryIntensiveFunction"
+| order by TimeGenerated desc
+```
+
+2. **Application Insights traces** (workspace table `AppTraces`, exported via
+   OpenTelemetry from the backend):
+```kusto
+AppTraces
+| where AppRoleName == "zava-backend"
+| where Message has "AVeryMemoryIntensiveFunction"
+| order by TimeGenerated desc
+```
+
+Container memory can be confirmed with the platform metric:
+```kusto
+AppMetrics
+| where Name == "WorkingSetBytes"
+| summarize max(Max) by bin(TimeGenerated, 1m)
 | order by TimeGenerated desc
 ```
 
@@ -111,8 +131,11 @@ SUBAGENT_INSTRUCTIONS="You are an SRE incident responder for the Zava e-commerce
 
 When you receive an Azure Monitor OOM or high-memory alert for the Zava Container App:
 
-1. **Diagnose** – Query Log Analytics for recent AVeryMemoryIntensiveFunction entries:
+1. **Diagnose** – Query Log Analytics for recent AVeryMemoryIntensiveFunction entries.
+   Container console logs:
    ContainerAppConsoleLogs_CL | where ContainerName_s == \"zava-backend\" | where Log_s has \"AVeryMemoryIntensiveFunction\" | order by TimeGenerated desc | take 20
+   Application Insights traces (same marker, richer context):
+   AppTraces | where AppRoleName == \"zava-backend\" | where Message has \"AVeryMemoryIntensiveFunction\" | order by TimeGenerated desc | take 20
 
 2. **Identify root cause** – Confirm that AVeryMemoryIntensiveFunction is the source of
    the memory pressure (look for rapidly increasing leak size values in the logs).

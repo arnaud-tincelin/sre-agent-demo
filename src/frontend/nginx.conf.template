@@ -3,12 +3,17 @@ server {
     server_name _;
 
     # Proxy API calls to the .NET backend.
-    # BACKEND_URL is substituted at container startup via envsubst.
+    # BACKEND_URL / BACKEND_HOST are substituted at container startup via envsubst.
     location /api/ {
         proxy_pass ${BACKEND_URL};
-        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        # ACA internal ingress routes by Host header and requires TLS SNI,
+        # so send the backend's own FQDN (not the frontend's public host).
+        proxy_set_header Host ${BACKEND_HOST};
+        proxy_ssl_server_name on;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # Serve the React SPA for all other paths.
