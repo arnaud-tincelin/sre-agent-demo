@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+
+# .NET
+bin/
+obj/
+
+# Node / React
+node_modules/
+dist/

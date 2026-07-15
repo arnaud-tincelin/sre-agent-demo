@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: sre-agent-demo
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  zava-backend:
+    project: src/backend
+    host: containerapp
+    language: dotnet
+    docker:
+      path: ./Dockerfile
+      context: .
+      remoteBuild: true
+
+  zava-frontend:
+    project: src/frontend
+    host: containerapp
+    language: js
+    docker:
+      path: ./Dockerfile
+      context: .
+      remoteBuild: true
+
+hooks:
+  preprovision:
+    shell: sh
+    run: ./scripts/pre-provision.sh
+    interactive: true
+  postprovision:
+    shell: sh
+    run: ./scripts/post-provision.sh
