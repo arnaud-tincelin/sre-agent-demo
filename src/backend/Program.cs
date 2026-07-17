@@ -72,10 +72,7 @@ app.MapGet("/api/catalog", (ILogger<Program> logger) =>
     return Results.Ok(catalog);
 });
 
-// Opening a product page triggers the SRE demo bug: it leaks ~10 MB and gets
-// progressively slower on every click, so product pages take longer and longer
-// to load as memory pressure builds.
-app.MapGet("/api/catalog/{id}", async (string id, ILogger<Program> logger) =>
+app.MapGet("/api/catalog/{id}", (string id, ILogger<Program> logger) =>
 {
     var product = catalog.FirstOrDefault(p => p.Id == id);
     if (product is null)
@@ -84,7 +81,6 @@ app.MapGet("/api/catalog/{id}", async (string id, ILogger<Program> logger) =>
     }
 
     logger.LogInformation("Opening product {ProductId} ({ProductName}).", product.Id, product.Name);
-    await AVeryMemoryIntensiveFunction(logger);
     return Results.Ok(product);
 });
 
@@ -96,26 +92,6 @@ app.Logger.LogInformation("Zava backend started with {ProductCount} products in 
 
 app.Run();
 
-// ── Memory leak ───────────────────────────────────────────────────────────────
-
-static async Task AVeryMemoryIntensiveFunction(ILogger logger)
-{
-    LeakBucket.Items.Add(new byte[10_000_000]); // 10 MB per call, never released
-    var leakSize = LeakBucket.Items.Count;
-    logger.LogError("AVeryMemoryIntensiveFunction leak size={LeakSize}", leakSize);
-
-    // The service degrades as memory pressure builds: every leaked block adds
-    // latency, so each product page takes longer to open than the last.
-    var delay = TimeSpan.FromMilliseconds(Math.Min(500 * leakSize, 30_000));
-    logger.LogWarning("AVeryMemoryIntensiveFunction stalling request for {DelayMs} ms", delay.TotalMilliseconds);
-    await Task.Delay(delay);
-}
-
 // ── Types ─────────────────────────────────────────────────────────────────────
-
-static class LeakBucket
-{
-    public static readonly List<byte[]> Items = [];
-}
 
 record Product(string Id, string Name, decimal Price, string Category, string Description, string Emoji);
