@@ -12,15 +12,8 @@ var containerRegistryName = 'acr${uniqueString(resourceGroup().id, environmentNa
 var appsIdentityName = 'id-zava-apps-${environmentName}'
 var zavaBackendAppName = 'ca-zava-backend-${environmentName}'
 var zavaFrontendAppName = 'ca-zava-frontend-${environmentName}'
-var sreAgentName = 'sre-agent-${environmentName}'
-var sreAgentIdentityName = 'id-sre-agent-${environmentName}'
-var actionGroupName = 'ag-sre-agent-${environmentName}'
-var memoryAlertName = 'alert-zava-oom-${environmentName}'
 
 // ── Built-in role IDs ────────────────────────────────────────────────────────
-var readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
-var monitoringReaderRoleId = '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
-var logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a893'
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
 // ── Log Analytics Workspace ──────────────────────────────────────────────────
@@ -206,136 +199,17 @@ resource zavaFrontendApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-// ── SRE Agent – Managed Identity ─────────────────────────────────────────────
-resource sreAgentIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: sreAgentIdentityName
-  location: location
-}
-
-// Reader on the resource group (list resources, describe Container Apps)
-resource readerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, sreAgentIdentity.id, readerRoleId)
-  scope: resourceGroup()
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', readerRoleId)
-    principalId: sreAgentIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Monitoring Reader on the resource group (read Azure Monitor alerts + metrics)
-resource monitoringReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, sreAgentIdentity.id, monitoringReaderRoleId)
-  scope: resourceGroup()
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringReaderRoleId)
-    principalId: sreAgentIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// Log Analytics Reader on the workspace (run KQL queries)
-resource logAnalyticsReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(logAnalyticsWorkspace.id, sreAgentIdentity.id, logAnalyticsReaderRoleId)
-  scope: logAnalyticsWorkspace
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', logAnalyticsReaderRoleId)
-    principalId: sreAgentIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ── Action Group – SRE Agent incident platform entry point ───────────────────
-// The Azure Monitor alert fires into this action group; the SRE Agent is
-// registered as a receiver on the action group via its incident platform.
-resource sreAgentActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: actionGroupName
-  location: 'global'
-  properties: {
-    groupShortName: 'sre-agent'
-    enabled: true
-  }
-}
-
-resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
-  name: sreAgentName
-  location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${sreAgentIdentity.id}': {}
-    }
-  }
-  properties: {
-    upgradeChannel: 'Stable'
-
-    knowledgeGraphConfiguration: {
-      identity: sreAgentIdentity.id
-      managedResources: []
-    }
-
-    logConfiguration: {
-      applicationInsightsConfiguration: {
-        appId: appInsights.properties.AppId
-      }
-    }
-
-    actionConfiguration: {
-      identity: sreAgentIdentity.id
-      mode: 'Autonomous'
-      accessLevel: 'High'
-    }
-
-    defaultModel: {
-      provider: 'Anthropic'
-      name: 'Automatic'
-    }
-  }
-}
-
-// ── SRE Agent – GitHub integration (configured in the agent Builder) ─────────
-// GitHub is NOT wired up through a Microsoft.App/agents/connectors resource:
-// 'GitHub' is not a valid ARM dataConnectorType (valid types are Kusto, Mcp,
-// Outlook, Teams), so an ARM connector for it deploys but reports "Failed".
-//
-// Instead, configure GitHub via the agent Builder (data plane), per docs:
-//   • Code Access  (Builder > Code Access)  – source code reading / RCA
-//   • GitHub Connector (Builder > Connectors) – open issues, PRs, workflows
-// Both use the PAT from `azd env set GITHUB_PAT <token>` and the repository
-// from `azd env set GITHUB_REPOSITORY <owner/repo>`.
-
-// ── Metric Alert – Zava OOM / memory pressure ─────────────────────────────────
-// Fires when Zava's working-set memory exceeds 800 MiB (≈80 % of the 1 Gi
-// container limit), which indicates AVeryMemoryIntensiveFunction is running.
-resource zavaMemoryAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
-  name: memoryAlertName
-  location: 'global'
-  properties: {
-    description: 'Zava Container App memory > 800 MiB - AVeryMemoryIntensiveFunction OOM pressure detected.'
-    severity: 2
-    enabled: true
-    scopes: [zavaBackendApp.id]
-    evaluationFrequency: 'PT1M'
-    windowSize: 'PT5M'
-    criteria: {
-      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
-      allOf: [
-        {
-          name: 'HighMemoryUsage'
-          metricNamespace: 'Microsoft.App/containerApps'
-          metricName: 'WorkingSetBytes'
-          operator: 'GreaterThan'
-          threshold: 838860800 // 800 MiB in bytes
-          timeAggregation: 'Average'
-          criterionType: 'StaticThresholdCriterion'
-        }
-      ]
-    }
-    actions: [
-      {
-        actionGroupId: sreAgentActionGroup.id
-      }
-    ]
+// ── SRE Agent (module) ───────────────────────────────────────────────────────
+// Agent, its managed identity + RBAC, the incident Action Group, and the Zava
+// OOM metric alert live in sre-agent.bicep.
+module sreAgent 'sre-agent.bicep' = {
+  name: 'sre-agent'
+  params: {
+    location: location
+    environmentName: environmentName
+    appInsightsAppId: appInsights.properties.AppId
+    appInsightsConnectionString: appInsights.properties.ConnectionString
+    backendContainerAppId: zavaBackendApp.id
   }
 }
 
@@ -349,7 +223,7 @@ output APPLICATIONINSIGHTS_RESOURCE_ID string = appInsights.id
 // SERVICE_*_NAME outputs tell azd which container app to update with each built image.
 output SERVICE_ZAVA_BACKEND_NAME string = zavaBackendApp.name
 output SERVICE_ZAVA_FRONTEND_NAME string = zavaFrontendApp.name
-output SRE_AGENT_NAME string = sreAgent.name
+output SRE_AGENT_NAME string = sreAgent.outputs.sreAgentName
 // azd pushes the built images to this registry (remoteBuild).
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.properties.loginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = containerRegistry.name

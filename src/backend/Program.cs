@@ -97,18 +97,35 @@ app.Logger.LogInformation("Zava backend started with {ProductCount} products in 
 app.Run();
 
 // ── Memory leak ───────────────────────────────────────────────────────────────
-
 static async Task AVeryMemoryIntensiveFunction(ILogger logger)
 {
-    LeakBucket.Items.Add(new byte[10_000_000]); // 10 MB per call, never released
-    var leakSize = LeakBucket.Items.Count;
-    logger.LogError("AVeryMemoryIntensiveFunction leak size={LeakSize}", leakSize);
+    try
+    {
+        // Simulate a memory-intensive operation that allocates a large object.
+        await Task.Delay(100); // Simulate some processing time
 
-    // The service degrades as memory pressure builds: every leaked block adds
-    // latency, so each product page takes longer to open than the last.
-    var delay = TimeSpan.FromMilliseconds(Math.Min(500 * leakSize, 30_000));
-    logger.LogWarning("AVeryMemoryIntensiveFunction stalling request for {DelayMs} ms", delay.TotalMilliseconds);
-    await Task.Delay(delay);
+        var block = new byte[50_000_000]; // 50 MB per call, never released
+        // Touch every page with non-zero data so the memory is actually committed
+        // to physical RAM (RSS / WorkingSetBytes). A freshly allocated byte[] is
+        // zero-filled from a fresh mmap, so on Linux the pages stay mapped
+        // copy-on-write to the kernel's shared zero page and never count toward
+        // the container's memory metric until they are written to.
+        Array.Fill(block, (byte)0xFF);
+        LeakBucket.Items.Add(block);
+        var leakSize = LeakBucket.Items.Count;
+        logger.LogError("AVeryMemoryIntensiveFunction leak size={LeakSize}", leakSize);
+
+        // The service degrades as memory pressure builds: every leaked block adds
+        // latency, so each product page takes longer to open than the last.
+        var delay = TimeSpan.FromMilliseconds(Math.Min(500 * leakSize, 30_000));
+        logger.LogWarning("AVeryMemoryIntensiveFunction stalling request for {DelayMs} ms", delay.TotalMilliseconds);
+        await Task.Delay(delay);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "An error occurred in AVeryMemoryIntensiveFunction.");
+        throw;
+    }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────

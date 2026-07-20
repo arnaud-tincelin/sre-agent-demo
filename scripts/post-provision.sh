@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# post-provision.sh – Configure the Azure SRE Agent after infrastructure is provisioned.
+# post-provision.sh - Configure the Azure SRE Agent after infrastructure is provisioned.
 #
 # Called automatically by `azd up` via the postprovision hook in azure.yaml.
 # Requires the following azd environment variables to be set before running:
 #
-#   AZURE_RESOURCE_GROUP    – resource group that was provisioned
-#   AZURE_SUBSCRIPTION_ID   – subscription ID
-#   AZURE_ENV_NAME          – azd environment name
-#   GITHUB_REPOSITORY       – owner/repo for GitHub issue creation (e.g. "myorg/sre-agent-demo")
+#   AZURE_RESOURCE_GROUP    - resource group that was provisioned
+#   AZURE_SUBSCRIPTION_ID   - subscription ID
+#   AZURE_ENV_NAME          - azd environment name
+#   GITHUB_REPOSITORY       - owner/repo for GitHub issue creation (e.g. "myorg/sre-agent-demo")
+#   GITHUB_PAT              - fine-grained PAT with 'repo' scope, used to connect Code Access
 #
 # NOTE: Microsoft.App/agents is a public-preview service. The data-plane API
 # endpoints and payload schemas below reflect the preview spec. Verify against
@@ -53,6 +54,39 @@ TOKEN=$(az account get-access-token \
   --output tsv)
 
 AUTH_HEADER="Authorization: Bearer ${TOKEN}"
+
+# ── 0. Connect source code (Code Access) ──────────────────────────────────────
+# Gives the agent read access to the repo so it can do root-cause analysis with
+# file:line references and error-to-source correlation. This is the "Code"
+# source shown in the agent Overview — it cannot be set via ARM/Bicep (GitHub is
+# not a valid ARM dataConnectorType), only through this data-plane call.
+# API: PUT {endpoint}/api/v2/repos/{repoName}
+if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT:-}" ]; then
+  echo "==> Connecting source code (Code Access) for ${GITHUB_REPO}..."
+  REPO_NAME="${GITHUB_REPO##*/}"
+  CODE_BODY=$(jq -n \
+    --arg url "https://github.com/${GITHUB_REPO}" \
+    --arg pat "${GITHUB_PAT}" \
+    '{properties: {url: $url, type: "GitHub", pat: $pat}}')
+  CODE_STATUS=$(curl -s -o /tmp/sre-code-access.json -w '%{http_code}' \
+    -X PUT "${AGENT_ENDPOINT}/api/v2/repos/${REPO_NAME}" \
+    -H "${AUTH_HEADER}" \
+    -H "Content-Type: application/json" \
+    -d "${CODE_BODY}" || echo "000")
+  case "${CODE_STATUS}" in
+    200 | 201)
+      echo "  Code Access connected for ${GITHUB_REPO} (repo '${REPO_NAME}')."
+      ;;
+    *)
+      echo "  WARNING: Code Access request returned HTTP ${CODE_STATUS}."
+      echo "           Response: $(head -c 400 /tmp/sre-code-access.json 2>/dev/null)"
+      echo "           You can finish it in the portal: Builder > Code Access."
+      ;;
+  esac
+  rm -f /tmp/sre-code-access.json
+else
+  echo "  Skipping Code Access: GITHUB_REPOSITORY and GITHUB_PAT are both required."
+fi
 
 # ── 1. Upload runbook (knowledge-base document) ───────────────────────────────
 echo "==> Uploading Zava runbook to knowledge base..."
@@ -131,20 +165,20 @@ SUBAGENT_INSTRUCTIONS="You are an SRE incident responder for the Zava e-commerce
 
 When you receive an Azure Monitor OOM or high-memory alert for the Zava Container App:
 
-1. **Diagnose** – Query Log Analytics for recent AVeryMemoryIntensiveFunction entries.
+1. **Diagnose** - Query Log Analytics for recent AVeryMemoryIntensiveFunction entries.
    Container console logs:
    ContainerAppConsoleLogs_CL | where ContainerName_s == \"zava-backend\" | where Log_s has \"AVeryMemoryIntensiveFunction\" | order by TimeGenerated desc | take 20
    Application Insights traces (same marker, richer context):
    AppTraces | where AppRoleName == \"zava-backend\" | where Message has \"AVeryMemoryIntensiveFunction\" | order by TimeGenerated desc | take 20
 
-2. **Identify root cause** – Confirm that AVeryMemoryIntensiveFunction is the source of
+2. **Identify root cause** - Confirm that AVeryMemoryIntensiveFunction is the source of
    the memory pressure (look for rapidly increasing leak size values in the logs).
 
-3. **Mitigate** – Scale the Container App to reduce per-replica load:
+3. **Mitigate** - Scale the Container App to reduce per-replica load:
    az containerapp update --resource-group <RG> --name <CONTAINER_APP> --max-replicas 4
 
-4. **Report** – Open a GitHub issue in ${GITHUB_REPO} titled
-   '[SRE] Zava OOM – AVeryMemoryIntensiveFunction detected' with:
+4. **Report** - Open a GitHub issue in ${GITHUB_REPO} titled
+   '[SRE] Zava OOM - AVeryMemoryIntensiveFunction detected' with:
    - Alert trigger time and metric value
    - Top 5 log lines showing the leak progression
    - Mitigation action taken (az containerapp update command and result)
