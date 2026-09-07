@@ -1,0 +1,59 @@
+{
+  "$comment": "Declarative SRE Agent configuration. Applied by scripts/post-provision.sh. Tool names must exist in GET /api/v2/agent/tools; the API accepts unknown names silently, so the script cross-checks them.",
+  "customInstructions": "custom-instructions.md",
+  "knowledgeBase": [
+    "knowledge-base/zava-environment.md"
+  ],
+  "skills": [
+    "skills/diagnose-zava-app-exception.md",
+    "skills/repair-zava-catalog-config.md"
+  ],
+  "subagents": [
+    {
+      "name": "code-investigator",
+      "handoffDescription": "Root-causes Zava HTTP 500 exceptions against source and files a GitHub issue. Has no Azure write tools.",
+      "instructions": "instructions/code-investigator.md",
+      "tools": [
+        "SearchMemory",
+        "SearchIncidentKnowledge",
+        "QueryLogAnalyticsByWorkspaceId",
+        "QueryAppInsightsByResourceId",
+        "RunAzCliReadCommands",
+        "FindConnectedGitHubRepo",
+        "ListDir",
+        "FileSearch",
+        "GrepSearch",
+        "ReadFile",
+        "RunInTerminal"
+      ]
+    },
+    {
+      "name": "platform-operator",
+      "handoffDescription": "Repairs Zava Container App configuration faults through the Azure CLI. Has no GitHub or terminal tools.",
+      "instructions": "instructions/platform-operator.md",
+      "tools": [
+        "SearchMemory",
+        "SearchIncidentKnowledge",
+        "QueryLogAnalyticsByWorkspaceId",
+        "QueryAppInsightsByResourceId",
+        "RunAzCliReadCommands",
+        "RunAzCliWriteCommands",
+        "system-mcp-monitor_monitor_activitylog_list"
+      ]
+    }
+  ],
+  "responsePlans": [
+    {
+      "id": "zava-app-exception",
+      "name": "Zava application exceptions",
+      "titleContains": "app-exception",
+      "handlingAgent": "code-investigator"
+    },
+    {
+      "id": "zava-availability",
+      "name": "Zava catalog availability",
+      "titleContains": "availability",
+      "handlingAgent": "platform-operator"
+    }
+  ]
+}

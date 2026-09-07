@@ -64,13 +64,19 @@ AUTH_HEADER="Authorization: Bearer ${TOKEN}"
 if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT:-}" ]; then
   echo "==> Connecting source code (Code Access) for ${GITHUB_REPO}..."
   REPO_NAME="${GITHUB_REPO##*/}"
+  # Code Access clones the default branch unless a branch is named. When the demo
+  # runs from a feature branch the agent would otherwise investigate code that does
+  # not contain the fault, so pin it to the branch that is actually deployed.
+  GITHUB_BRANCH="${GITHUB_BRANCH:-$(git -C "$(dirname "$0")/.." rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
   # The top-level name must match the {repoName} path segment or the API returns
   # 400 ObjectNameMismatch when the repo already exists.
   CODE_BODY=$(jq -n \
     --arg name "${REPO_NAME}" \
     --arg url "https://github.com/${GITHUB_REPO}" \
     --arg pat "${GITHUB_PAT}" \
-    '{name: $name, type: "CodeRepo", properties: {url: $url, type: "GitHub", pat: $pat}}')
+    --arg branch "${GITHUB_BRANCH}" \
+    '{name: $name, type: "CodeRepo", properties: ({url: $url, type: "GitHub", pat: $pat}
+      + (if $branch == "" or $branch == "HEAD" then {} else {branch: $branch} end))}')
   CODE_STATUS=$(curl -s -o /tmp/sre-code-access.json -w '%{http_code}' \
     -X PUT "${AGENT_ENDPOINT}/api/v2/repos/${REPO_NAME}" \
     -H "${AUTH_HEADER}" \
@@ -78,7 +84,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT:-}" ]; then
     -d "${CODE_BODY}" || echo "000")
   case "${CODE_STATUS}" in
     200 | 201)
-      echo "  Code Access connected for ${GITHUB_REPO} (repo '${REPO_NAME}')."
+      echo "  Code Access connected for ${GITHUB_REPO} (repo '${REPO_NAME}', branch '${GITHUB_BRANCH:-default}')."
       ;;
     *)
       echo "  WARNING: Code Access request returned HTTP ${CODE_STATUS}."
@@ -91,194 +97,107 @@ else
   echo "  Skipping Code Access: GITHUB_REPOSITORY and GITHUB_PAT are both required."
 fi
 
-# ── 1. Upload runbooks (knowledge-base documents) ───────────────────────────────
-echo "==> Uploading Zava runbooks to knowledge base..."
+# ── 1. Apply sre-config ───────────────────────────────
+# Everything the agent reads at runtime - global instructions, knowledge, skills,
+# subagents, and response plans - is declared in sre-config/ and applied from here.
+CONFIG_DIR="$(cd "$(dirname "$0")/../sre-config" && pwd)"
+CONFIG_FILE="${CONFIG_DIR}/agent-config.json"
 
-# Knowledge base ingestion is a multipart file upload, not a JSON document POST.
-KB_DIR="$(mktemp -d)"
-trap 'rm -rf "${KB_DIR}"' EXIT
+if [ ! -f "${CONFIG_FILE}" ]; then
+  echo "ERROR: ${CONFIG_FILE} not found."
+  exit 1
+fi
 
-# Scenario 1 - code fault. HTTP 500 raised by an unhandled exception.
-APP_ERRORS_RUNBOOK=$(cat <<'RUNBOOK_EOF'
-# Zava Runbook: HTTP 500 / application exceptions
+STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "${STAGE_DIR}"' EXIT
 
-## Scope
-Use this runbook when the Zava storefront returns HTTP 500 and the backend is
-recording unhandled exceptions. Alert name contains `app-exception`.
+# ${GITHUB_REPO} and ${RG} are the only placeholders allowed in sre-config markdown.
+render() {
+  sed -e "s|\${GITHUB_REPO}|${GITHUB_REPO:-the connected repository}|g" \
+      -e "s|\${RG}|${RG}|g" "$1"
+}
 
-## Environment
-- Storefront: React SPA on Azure Container Apps; nginx proxies `/api/*` to the backend.
-- Backend: .NET minimal API on Container App `ca-zava-backend-*`, container `zava-backend`,
-  telemetry role name `zava-backend`.
-- Source: the repository connected under Code Access. Backend entry point is
-  `src/backend/Program.cs`.
-
-## Diagnose
-Telemetry note: `AppRoleName` is the Container App name (`ca-zava-backend-<env>`),
-not the container name. Match on the prefix.
-
-Exceptions with type, message, and stack trace:
-```kusto
-AppExceptions
-| where AppRoleName startswith "ca-zava-backend"
-| project TimeGenerated, ProblemId, OuterType, OuterMessage, Details, OperationId
-| order by TimeGenerated desc
-| take 20
-```
-
-Which routes are failing, and how many requests are affected:
-```kusto
-AppRequests
-| where AppRoleName startswith "ca-zava-backend"
-| summarize Total = count(), Failed = countif(ResultCode == "500") by Name, bin(TimeGenerated, 5m)
-| order by TimeGenerated desc
-```
-
-Correlate a failing request with its exception through `OperationId`:
-```kusto
-AppRequests
-| where AppRoleName startswith "ca-zava-backend" and ResultCode == "500"
-| join kind=inner (AppExceptions | where AppRoleName startswith "ca-zava-backend") on OperationId
-| project TimeGenerated, Name, Url, OuterType, OuterMessage, Details
-| order by TimeGenerated desc
-```
-
-Container console output for the same window:
-```kusto
-ContainerAppConsoleLogs_CL
-| where ContainerName_s == "zava-backend"
-| order by TimeGenerated desc
-| take 50
-```
-
-## Root cause analysis
-The `Details` column of `AppExceptions` carries the parsed stack trace, including the
-method, source file, and line number. Open that file in the connected repository, read
-the surrounding code, and identify the exact statement that threw and why. Always
-report the root cause as `file:line`.
-
-## Remediation policy
-Application exceptions are code defects. They are NOT remediable from the Azure control
-plane. Do not scale, restart, roll back, or reconfigure the Container App in response to
-this alert - it cannot fix the defect and it destroys evidence.
-
-The correct action is to file a GitHub issue in the connected repository so the owning
-team can ship a fix.
-
-## Issue content
-- Alert name and firing time
-- Customer-visible symptom and how to reproduce it from the storefront
-- Exception type and message
-- Stack frame with `file:line`
-- The offending code, quoted from the repository
-- Number of affected requests and the time window
-- A concrete, minimal suggested fix
-- An explicit note that no Azure resource was modified
-RUNBOOK_EOF
-)
-
-# Scenario 2 - platform fault. HTTP 503 caused by an invalid Container App configuration.
-PLATFORM_RUNBOOK=$(cat <<'RUNBOOK_EOF'
-# Zava Runbook: catalog unavailable / HTTP 503
-
-## Scope
-Use this runbook when the Zava storefront catalog is unavailable and the backend
-returns HTTP 503. Alert name contains `availability`.
-
-## Environment
-- Backend Container App: `ca-zava-backend-*`, container `zava-backend`.
-- The backend reads its catalog provider from the `CATALOG_SOURCE` environment
-  variable, supplied by the Container App configuration.
-- Known-good value: `CATALOG_SOURCE=builtin`. It is the only provider this build
-  implements. Any other value makes every `/api/catalog*` route return HTTP 503 and
-  `/api/health` report `unhealthy`.
-
-## Diagnose
-Telemetry note: `AppRoleName` is the Container App name (`ca-zava-backend-<env>`),
-not the container name. Match on the prefix.
-
-Confirm the symptom and establish when it started:
-```kusto
-AppRequests
-| where AppRoleName startswith "ca-zava-backend"
-| summarize Requests = count(), Unavailable = countif(ResultCode == "503") by bin(TimeGenerated, 5m)
-| order by TimeGenerated desc
-```
-
-The backend logs the reason on every failed request:
-```kusto
-AppTraces
-| where AppRoleName startswith "ca-zava-backend"
-| where Message has "CONFIG_ERROR"
-| order by TimeGenerated desc
-| take 20
-```
-
-Read the current configuration:
-```bash
-az containerapp show -g <RG> -n <BACKEND_APP> --query "properties.template.containers[0].env" -o table
-```
-
-List revisions to see when a new one appeared and which one serves traffic:
-```bash
-az containerapp revision list -g <RG> -n <BACKEND_APP> --query "[].{name:name, created:properties.createdTime, active:properties.active, traffic:properties.trafficWeight}" -o table
-```
-
-Find the change that caused it:
-```bash
-az monitor activity-log list -g <RG> --offset 6h --query "[?contains(operationName.value, 'Microsoft.App/containerApps/write')].{time:eventTimestamp, caller:caller, status:status.value}" -o table
-```
-
-## Remediation
-This is a platform configuration fault, not a code defect. Do not open a GitHub issue
-for it and do not request a code change - the deployed image is correct.
-
-Restore the known-good value:
-```bash
-az containerapp update -g <RG> -n <BACKEND_APP> --set-env-vars CATALOG_SOURCE=builtin
-```
-
-## Verify
-1. `az containerapp show` reports `CATALOG_SOURCE=builtin`.
-2. The new revision reaches a healthy running state and takes 100% of traffic.
-3. `/api/health` returns HTTP 200 with `status: healthy`.
-4. The `AppRequests` query above shows `Unavailable` back at zero.
-RUNBOOK_EOF
-)
-
-printf '%s\n' "${APP_ERRORS_RUNBOOK}" > "${KB_DIR}/zava-app-errors.md"
-printf '%s\n' "${PLATFORM_RUNBOOK}" > "${KB_DIR}/zava-platform-config.md"
-
-KB_STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
-  -X POST "${AGENT_ENDPOINT}/api/v1/AgentMemory/upload" \
-  -H "${AUTH_HEADER}" \
-  -F "triggerIndexing=true" \
-  -F "files=@${KB_DIR}/zava-app-errors.md;type=text/plain" \
-  -F "files=@${KB_DIR}/zava-platform-config.md;type=text/plain" || echo "000")
-
-case "${KB_STATUS}" in
-  200 | 201 | 202)
-    echo "  Uploaded zava-app-errors.md and zava-platform-config.md (indexing)."
-    ;;
-  *)
-    echo "  WARNING: knowledge base upload returned HTTP ${KB_STATUS}."
-    ;;
+echo "==> Applying global custom instructions..."
+CI_FILE="${CONFIG_DIR}/$(jq -r '.customInstructions' "${CONFIG_FILE}")"
+CI_STATUS=$(render "${CI_FILE}" | jq -Rs '{instructions: .}' \
+  | curl -s -o /dev/null -w '%{http_code}' \
+    -X PUT "${AGENT_ENDPOINT}/api/v2/agent/customInstructions" \
+    -H "${AUTH_HEADER}" -H "Content-Type: application/json" -d @- || echo "000")
+case "${CI_STATUS}" in
+  200 | 201 | 204) echo "  $(basename "${CI_FILE}") applied." ;;
+  *) echo "  WARNING: custom instructions returned HTTP ${CI_STATUS}." ;;
 esac
+
+echo "==> Uploading knowledge base..."
+KB_ARGS=()
+while IFS= read -r rel; do
+  render "${CONFIG_DIR}/${rel}" > "${STAGE_DIR}/$(basename "${rel}")"
+  KB_ARGS+=(-F "files=@${STAGE_DIR}/$(basename "${rel}");type=text/plain")
+  echo "  ${rel}"
+done < <(jq -r '.knowledgeBase[]' "${CONFIG_FILE}")
+
+if [ ${#KB_ARGS[@]} -gt 0 ]; then
+  KB_STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST "${AGENT_ENDPOINT}/api/v1/AgentMemory/upload" \
+    -H "${AUTH_HEADER}" \
+    -F "triggerIndexing=true" \
+    "${KB_ARGS[@]}" || echo "000")
+  case "${KB_STATUS}" in
+    200 | 201 | 202) echo "  uploaded, indexing." ;;
+    *) echo "  WARNING: knowledge base upload returned HTTP ${KB_STATUS}." ;;
+  esac
+fi
+
+# Skills are progressive disclosure: the description decides when the body gets
+# loaded, so it has to describe the trigger rather than just the topic.
+#
+# PUT /api/v2/extendedAgent/skills/{name} is idempotent and stores the body in a
+# readable skillContent property, so the verify step can diff it against source.
+# (The other route - POST /api/v2/agent/skills - needs the body nested in files[]
+# with fileName, filePath AND content, silently ignores a top-level content
+# field, and exposes no way to read the result back.)
+echo "==> Applying skills..."
+while IFS= read -r rel; do
+  SKILL_PATH="${CONFIG_DIR}/${rel}"
+  SKILL_ID=$(sed -n 's/^name: //p' "${SKILL_PATH}" | head -1)
+  SKILL_DESC=$(sed -n 's/^description: //p' "${SKILL_PATH}" | head -1)
+  SKILL_BODY=$(render "${SKILL_PATH}" | awk 'BEGIN { d = 0 } /^---$/ { d++; next } d >= 2 { print }')
+
+  SKILL_STATUS=$(jq -n \
+      --arg id "${SKILL_ID}" \
+      --arg desc "${SKILL_DESC}" \
+      --arg content "${SKILL_BODY}" \
+      '{
+        name: $id,
+        type: "Skill",
+        tags: [],
+        properties: {
+          name: $id,
+          description: $desc,
+          tools: [],
+          skillContent: $content,
+          additionalFiles: [],
+          sourcePluginInstallation: null
+        }
+      }' \
+    | curl -s -o /dev/null -w '%{http_code}' \
+      -X PUT "${AGENT_ENDPOINT}/api/v2/extendedAgent/skills/${SKILL_ID}" \
+      -H "${AUTH_HEADER}" -H "Content-Type: application/json" -d @- || echo "000")
+
+  case "${SKILL_STATUS}" in
+    200 | 201 | 202 | 204) echo "  ${SKILL_ID}: applied" ;;
+    *) echo "  WARNING: skill ${SKILL_ID} returned HTTP ${SKILL_STATUS}" ;;
+  esac
+done < <(jq -r '.skills[]' "${CONFIG_FILE}")
 
 # ── 2. Create the scenario subagents ───────────────────────────────────
 echo "==> Creating scenario subagents..."
 
 # The tool grants are the real guardrail: code-investigator gets no Azure write
 # tool, platform-operator gets no terminal. Neither can do the other's job even if
-# the model is talked into trying.
-#
-# Every name below is verified against GET /api/v2/agent/tools on a live agent.
-# The API accepts unknown tool names silently, so a typo becomes a tool the
-# subagent simply never has. This agent build exposes no CreateGithubIssue tool,
-# so the issue is filed from the sandbox terminal against the GitHub REST API.
-CODE_INVESTIGATOR_TOOLS='["SearchMemory","SearchIncidentKnowledge","QueryLogAnalyticsByWorkspaceId","QueryAppInsightsByResourceId","RunAzCliReadCommands","FindConnectedGitHubRepo","ListDir","FileSearch","GrepSearch","ReadFile","RunInTerminal"]'
-PLATFORM_OPERATOR_TOOLS='["SearchMemory","SearchIncidentKnowledge","QueryLogAnalyticsByWorkspaceId","QueryAppInsightsByResourceId","RunAzCliReadCommands","RunAzCliWriteCommands","system-mcp-monitor_monitor_activitylog_list"]'
-
+# the model is talked into trying. Grants live in sre-config/agent-config.json and
+# are cross-checked against the live roster in the verify step, because the API
+# accepts unknown tool names silently.
 create_subagent() {
   local name="$1"
   local handoff="$2"
@@ -317,98 +236,17 @@ create_subagent() {
   esac
 }
 
-# Scenario 1 - investigates code defects, files a GitHub issue, changes nothing in Azure.
-CODE_INVESTIGATOR_INSTRUCTIONS="You are a software reliability investigator for the Zava storefront.
-
-You handle alerts about HTTP 500 errors and unhandled exceptions in the Zava backend
-(alert name contains 'app-exception'). Follow the zava-app-errors.md runbook.
-
-1. Confirm the symptom and its blast radius.
-   AppRequests | where AppRoleName startswith \"ca-zava-backend\" | summarize Total = count(), Failed = countif(ResultCode == \"500\") by Name, bin(TimeGenerated, 5m) | order by TimeGenerated desc
-
-2. Retrieve the exception, including its stack trace.
-   AppExceptions | where AppRoleName startswith \"ca-zava-backend\" | project TimeGenerated, ProblemId, OuterType, OuterMessage, Details, OperationId | order by TimeGenerated desc | take 20
-
-3. Locate the defect in source. The Details column contains the stack trace with a
-   source file and line number. The connected repository is cloned into your
-   workspace - use FindConnectedGitHubRepo, then ListDir, GrepSearch, and ReadFile to
-   open that file, read the surrounding code, and identify the exact statement that
-   throws and why it throws.
-
-4. Do NOT remediate from Azure. This is a code defect. Do not scale, restart, roll back,
-   or reconfigure the Container App - there is no platform fix for it, and changing the
-   app destroys the evidence. You have deliberately not been given any Azure write tool.
-
-5. Open a GitHub issue in ${GITHUB_REPO:-the connected repository} using RunInTerminal.
-   Prefer the gh CLI:
-     gh issue create --repo ${GITHUB_REPO:-<owner/repo>} --title '<title>' --body '<body>'
-   If gh is unavailable or unauthenticated, fall back to the GitHub REST API with curl.
-   Title it '[SRE] HTTP 500 on <route> - <ExceptionType>'. The body must contain:
-   - Alert name and firing time
-   - Customer-visible symptom and how to reproduce it from the storefront
-   - Exception type and message
-   - The stack frame with file:line
-   - The offending code, quoted from the repository
-   - Number of affected requests and the time window
-   - A concrete, minimal suggested fix
-   - An explicit note that no Azure resource was modified
-
-6. Summarise the investigation in the incident thread and link the issue you created.
-   If issue creation fails, report the exact command and the error you got rather than
-   silently skipping the step."
-
-# Scenario 2 - repairs Container App configuration, files no issue.
-PLATFORM_OPERATOR_INSTRUCTIONS="You are a platform operator for the Zava storefront running on Azure Container Apps.
-
-You handle alerts about catalog unavailability and HTTP 503 responses (alert name
-contains 'availability'). Follow the zava-platform-config.md runbook.
-
-The backend Container App is in resource group ${RG} and its name starts with
-'ca-zava-backend'.
-
-1. Confirm the outage and establish when it started.
-   AppRequests | where AppRoleName startswith \"ca-zava-backend\" | summarize Requests = count(), Unavailable = countif(ResultCode == \"503\") by bin(TimeGenerated, 5m) | order by TimeGenerated desc
-
-2. Read the failure reason from the application logs.
-   AppTraces | where AppRoleName startswith \"ca-zava-backend\" | where Message has \"CONFIG_ERROR\" | order by TimeGenerated desc | take 20
-
-3. Inspect the platform configuration and compare it against the known-good baseline in
-   the runbook.
-   az containerapp show -g ${RG} -n <BACKEND_APP> --query \"properties.template.containers[0].env\"
-   az containerapp revision list -g ${RG} -n <BACKEND_APP> --query \"[].{name:name, created:properties.createdTime, active:properties.active, traffic:properties.trafficWeight}\"
-
-4. Correlate the outage with the change that introduced it.
-   az monitor activity-log list -g ${RG} --offset 6h --query \"[?contains(operationName.value, 'Microsoft.App/containerApps/write')]\"
-
-5. Remediate on the platform by restoring the known-good value.
-   az containerapp update -g ${RG} -n <BACKEND_APP> --set-env-vars CATALOG_SOURCE=builtin
-
-6. Verify recovery: re-read the environment variables, wait for the new revision to reach
-   a healthy running state with 100% of traffic, and confirm the 503 count returns to zero.
-
-7. Do NOT open a GitHub issue and do NOT request a code change. The deployed image is
-   correct; this incident was caused by a configuration change on the Container App.
-   You have deliberately not been given GitHub or terminal tools.
-
-8. Post a resolution summary in the incident thread: what broke, when it broke, the change
-   that caused it, the command you ran, and the evidence that the storefront recovered."
-
-create_subagent "code-investigator" \
-  "Deep root cause analysis of Zava application exceptions using telemetry plus source code; files a GitHub issue. Has no Azure write tools." \
-  "${CODE_INVESTIGATOR_INSTRUCTIONS}" \
-  "${CODE_INVESTIGATOR_TOOLS}"
-
-create_subagent "platform-operator" \
-  "Investigates Zava availability outages and repairs Container App configuration through the Azure CLI. Has no GitHub issue tools." \
-  "${PLATFORM_OPERATOR_INSTRUCTIONS}" \
-  "${PLATFORM_OPERATOR_TOOLS}"
+while IFS= read -r sub; do
+  SUB_NAME=$(jq -r '.name' <<<"${sub}")
+  SUB_HANDOFF=$(jq -r '.handoffDescription' <<<"${sub}")
+  SUB_TOOLS=$(jq -c '.tools' <<<"${sub}")
+  SUB_INSTRUCTIONS=$(render "${CONFIG_DIR}/$(jq -r '.instructions' <<<"${sub}")")
+  create_subagent "${SUB_NAME}" "${SUB_HANDOFF}" "${SUB_INSTRUCTIONS}" "${SUB_TOOLS}"
+done < <(jq -c '.subagents[]' "${CONFIG_FILE}")
 
 # ── 3. Create the response plans ───────────────────────────────────────────────
 echo "==> Creating response plans..."
 
-# Response plans are incident filters. Routing keys off titleContains, and both
-# filters must stay non-overlapping: every alert name contains "zava", so the
-# match uses the scenario-specific portion of the name instead.
 create_response_plan() {
   local id="$1"
   local name="$2"
@@ -421,33 +259,33 @@ create_response_plan() {
     --arg titleContains "${title_contains}" \
     --arg agent "${subagent}" \
     '{
-      id: $id,
-      name: $name,
-      priorities: ["Sev0", "Sev1", "Sev2", "Sev3", "Sev4"],
-      titleContains: $titleContains,
-      titleContainsAll: [],
-      titleContainsAny: [],
-      titleNotContains: [],
-      handlingAgent: $agent,
-      agentMode: "autonomous",
-      maxAutomatedInvestigationAttempts: 3,
-      mergeEnabled: false,
-      mergeWindowHours: 3,
-      isEnabled: true
+      name: $id,
+      type: "IncidentFilter",
+      tags: [],
+      properties: {
+        name: $name,
+        incidentPlatform: "AzMonitor",
+        priorities: ["Sev0", "Sev1", "Sev2", "Sev3", "Sev4"],
+        titleContains: $titleContains,
+        titleContainsAll: [],
+        titleContainsAny: [],
+        titleNotContains: [],
+        handlingAgent: $agent,
+        agentMode: "autonomous",
+        maxAutomatedInvestigationAttempts: 3,
+        mergeEnabled: false,
+        mergeWindowHours: 3,
+        isEnabled: true
+      }
     }')
   local status
-  # Delete first so re-running the script updates an existing plan rather than
-  # returning 409 and silently leaving the old routing in place.
-  curl -s -o /dev/null -X DELETE \
-    "${AGENT_ENDPOINT}/api/v1/incidentPlayground/filters/${id}" \
-    -H "${AUTH_HEADER}" || true
   status=$(curl -s -o /dev/null -w '%{http_code}' \
-    -X PUT "${AGENT_ENDPOINT}/api/v1/incidentPlayground/filters/${id}" \
+    -X PUT "${AGENT_ENDPOINT}/api/v2/extendedAgent/incidentFilters/${id}" \
     -H "${AUTH_HEADER}" \
     -H "Content-Type: application/json" \
     -d "${body}" || echo "000")
   case "${status}" in
-    200 | 201 | 202 | 204 | 409) echo "  ${id} -> ${subagent}" ;;
+    200 | 201 | 202 | 204) echo "  ${id} -> ${subagent}" ;;
     *) echo "  WARNING: response plan ${id} returned HTTP ${status}" ;;
   esac
 }
@@ -457,22 +295,46 @@ curl -s -o /dev/null -X DELETE \
   "${AGENT_ENDPOINT}/api/v1/incidentPlayground/filters/quickstart_response_plan" \
   -H "${AUTH_HEADER}" || true
 
-create_response_plan "zava-app-exception" \
-  "Zava application exceptions" \
-  "app-exception" \
-  "code-investigator"
-
-create_response_plan "zava-availability" \
-  "Zava catalog availability" \
-  "availability" \
-  "platform-operator"
+# Routing keys off titleContains, so the filters must stay non-overlapping: every
+# alert name contains "zava", hence matching on the scenario-specific portion.
+while IFS= read -r plan; do
+  create_response_plan \
+    "$(jq -r '.id' <<<"${plan}")" \
+    "$(jq -r '.name' <<<"${plan}")" \
+    "$(jq -r '.titleContains' <<<"${plan}")" \
+    "$(jq -r '.handlingAgent' <<<"${plan}")"
+done < <(jq -c '.responsePlans[]' "${CONFIG_FILE}")
 
 # ── 4. Verify ─────────────────────────────────────────────────────────────────
 echo "==> Verifying agent configuration..."
 
 echo "  Knowledge base:"
-curl -s "${AGENT_ENDPOINT}/api/v1/AgentMemory/files" -H "${AUTH_HEADER}" \
-  | jq -r '.files[]? | "    \(.name) indexed=\(.isIndexed)"' || echo "    (unavailable)"
+# Indexing is asynchronous. For a few seconds after upload a file reports
+# isIndexed=false with a scary "could not be indexed" reason, then settles.
+KB_JSON=""
+for _ in 1 2 3 4 5 6; do
+  KB_JSON=$(curl -s "${AGENT_ENDPOINT}/api/v1/AgentMemory/files" -H "${AUTH_HEADER}")
+  if [ "$(jq -r '[.files[]? | select(.isIndexed | not)] | length' <<<"${KB_JSON}" 2>/dev/null || echo 1)" = "0" ]; then
+    break
+  fi
+  sleep 5
+done
+jq -r '.files[]? | "    \(.name) indexed=\(.isIndexed)"' <<<"${KB_JSON}" || echo "    (unavailable)"
+
+echo "  Skills:"
+# skillContent is readable, so diff the deployed body against source rather than
+# trusting the PUT status.
+for rel in $(jq -r '.skills[]' "${CONFIG_FILE}"); do
+  SKILL_ID=$(sed -n 's/^name: //p' "${CONFIG_DIR}/${rel}" | head -1)
+  LOCAL=$(render "${CONFIG_DIR}/${rel}" | awk 'BEGIN { d = 0 } /^---$/ { d++; next } d >= 2 { print }')
+  REMOTE=$(curl -s "${AGENT_ENDPOINT}/api/v2/extendedAgent/skills" -H "${AUTH_HEADER}" \
+    | jq -r --arg n "${SKILL_ID}" '.value[] | select(.name == $n) | .properties.skillContent // ""')
+  if [ "$(printf '%s' "${LOCAL}" | tr -d '\r' | sed -e 's/[[:space:]]*$//')" = "$(printf '%s' "${REMOTE}" | tr -d '\r' | sed -e 's/[[:space:]]*$//')" ]; then
+    echo "    ${SKILL_ID} matches source ($(printf '%s' "${REMOTE}" | wc -c) chars)"
+  else
+    echo "    WARNING: ${SKILL_ID} differs from source (local=$(printf '%s' "${LOCAL}" | wc -c) remote=$(printf '%s' "${REMOTE}" | wc -c) chars)"
+  fi
+done
 
 echo "  Subagents:"
 # The subagent API accepts unknown tool names silently, so a stale or misspelled
@@ -489,7 +351,7 @@ curl -s "${AGENT_ENDPOINT}/api/v2/extendedAgent/agents" -H "${AUTH_HEADER}" \
     ' || echo "    (unavailable)"
 
 echo "  Response plans:"
-curl -s "${AGENT_ENDPOINT}/api/v1/incidentPlayground/filters" -H "${AUTH_HEADER}" \
-  | jq -r '.[]? | select(.isEnabled) | "    \(.id) titleContains=\"\(.titleContains)\" -> \(if .handlingAgent == "" then "(none)" else .handlingAgent end) [\(.agentMode)]"' || echo "    (unavailable)"
+curl -s "${AGENT_ENDPOINT}/api/v2/extendedAgent/incidentFilters" -H "${AUTH_HEADER}" \
+  | jq -r '.value[]? | select(.properties.isEnabled) | "    \(.name) titleContains=\"\(.properties.titleContains)\" -> \(if .properties.handlingAgent == "" then "(none)" else .properties.handlingAgent end) [\(.properties.agentMode)]"' || echo "    (unavailable)"
 
 echo "==> SRE Agent configuration complete."
