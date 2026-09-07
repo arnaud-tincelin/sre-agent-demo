@@ -4,7 +4,13 @@ param location string = resourceGroup().location
 @description('The azd environment name.')
 param environmentName string
 
-// ── Names ────────────────────────────────────────────────────────────────────
+@description('Set by azd. True once the backend container app has been deployed at least once.')
+param zavaBackendExists bool = false
+
+@description('Set by azd. True once the frontend container app has been deployed at least once.')
+param zavaFrontendExists bool = false
+
+// ── Names ───────────────────────────────────────────────────────────────────
 var logAnalyticsWorkspaceName = 'law-${environmentName}'
 var appInsightsName = 'appi-${environmentName}'
 var containerAppsEnvironmentName = 'cae-${environmentName}'
@@ -12,6 +18,25 @@ var containerRegistryName = 'acr${uniqueString(resourceGroup().id, environmentNa
 var appsIdentityName = 'id-zava-apps-${environmentName}'
 var zavaBackendAppName = 'ca-zava-backend-${environmentName}'
 var zavaFrontendAppName = 'ca-zava-frontend-${environmentName}'
+
+// Placeholder used only on the very first provision, before azd pushes an image.
+var placeholderImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+
+module backendImage 'fetch-container-image.bicep' = {
+  name: 'fetch-zava-backend-image'
+  params: {
+    name: zavaBackendAppName
+    exists: zavaBackendExists
+  }
+}
+
+module frontendImage 'fetch-container-image.bicep' = {
+  name: 'fetch-zava-frontend-image'
+  params: {
+    name: zavaFrontendAppName
+    exists: zavaFrontendExists
+  }
+}
 
 // ── Built-in role IDs ────────────────────────────────────────────────────────
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
@@ -122,7 +147,7 @@ resource zavaBackendApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'zava-backend'
-          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+          image: empty(backendImage.outputs.containers) ? placeholderImage : backendImage.outputs.containers[0].image
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -131,6 +156,11 @@ resource zavaBackendApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsights.properties.ConnectionString
+            }
+            {
+              // Known-good catalog provider. Scenario 2 overwrites this value.
+              name: 'CATALOG_SOURCE'
+              value: 'builtin'
             }
           ]
         }
@@ -177,7 +207,7 @@ resource zavaFrontendApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'zava-frontend'
-          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+          image: empty(frontendImage.outputs.containers) ? placeholderImage : frontendImage.outputs.containers[0].image
           resources: {
             cpu: json('0.25')
             memory: '0.5Gi'
@@ -200,8 +230,8 @@ resource zavaFrontendApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ── SRE Agent (module) ───────────────────────────────────────────────────────
-// Agent, its managed identity + RBAC, the incident Action Group, and the Zava
-// OOM metric alert live in sre-agent.bicep.
+// Agent, its managed identity + RBAC, the incident Action Group, and the two
+// demo alerts (app exceptions, catalog availability) live in sre-agent.bicep.
 module sreAgent 'sre-agent.bicep' = {
   name: 'sre-agent'
   params: {
@@ -209,7 +239,8 @@ module sreAgent 'sre-agent.bicep' = {
     environmentName: environmentName
     appInsightsAppId: appInsights.properties.AppId
     appInsightsConnectionString: appInsights.properties.ConnectionString
-    backendContainerAppId: zavaBackendApp.id
+    logAnalyticsWorkspaceId: logAnalyticsWorkspace.id
+    appInsightsResourceId: appInsights.id
   }
 }
 

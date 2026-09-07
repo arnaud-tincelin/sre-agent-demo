@@ -18,15 +18,31 @@ builder.Services.AddCors(options =>
               .AllowAnyMethod()
               .AllowAnyHeader()));
 
+// ── Platform configuration ────────────────────────────────────────────────────
+// CATALOG_SOURCE selects the catalog provider and is supplied by the platform as
+// a Container Apps environment variable. "builtin" is the only provider this
+// build ships with. CONTAINER_APP_REVISION is injected by Azure Container Apps.
+const string SupportedCatalogSource = "builtin";
+var catalogSource = builder.Configuration["CATALOG_SOURCE"] ?? SupportedCatalogSource;
+var revision = builder.Configuration["CONTAINER_APP_REVISION"] ?? "local";
+var catalogSourceValid = string.Equals(catalogSource, SupportedCatalogSource, StringComparison.OrdinalIgnoreCase);
+
 var app = builder.Build();
 
 app.UseCors();
 
 // Log every incoming request so both Log Analytics and App Insights capture traffic.
+// Health probes are excluded: the storefront polls them every few seconds and the
+// noise would bury the request pattern an investigation actually needs.
 app.Use(async (context, next) =>
 {
-    var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
-    logger.LogInformation("HTTP {Method} {Path}", context.Request.Method, context.Request.Path);
+    var path = context.Request.Path;
+    if (!path.StartsWithSegments("/api/health") && !path.StartsWithSegments("/healthz"))
+    {
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogInformation("HTTP {Method} {Path}", context.Request.Method, path);
+    }
+
     await next();
 });
 
@@ -65,18 +81,41 @@ var catalog = new[]
     new Product("20", "Guinea Pig Hideout",       16.75m, "Small",  "Cozy wooden hideaway house for small pets.",          "🏠"),
 };
 
-// Listing the catalog is cheap and fast.
-app.MapGet("/api/catalog", (ILogger<Program> logger) =>
+// Returned when the platform hands the app a catalog provider it cannot serve.
+IResult CatalogSourceUnavailable(ILogger logger)
 {
+    logger.LogError(
+        "CONFIG_ERROR CatalogSource='{CatalogSource}' is not a supported provider on revision {Revision}; expected '{Expected}'.",
+        catalogSource,
+        revision,
+        SupportedCatalogSource);
+
+    return Results.Problem(
+        title: "Catalog unavailable",
+        detail: $"CATALOG_SOURCE '{catalogSource}' is not a supported catalog provider.",
+        statusCode: StatusCodes.Status503ServiceUnavailable);
+}
+
+// Listing the catalog is cheap and fast.
+app.MapGet("/api/catalog", IResult (ILogger<Program> logger) =>
+{
+    if (!catalogSourceValid)
+    {
+        return CatalogSourceUnavailable(logger);
+    }
+
     logger.LogInformation("Serving catalog with {ProductCount} products.", catalog.Length);
     return Results.Ok(catalog);
 });
 
-// Opening a product page triggers the SRE demo bug: it leaks ~10 MB and gets
-// progressively slower on every click, so product pages take longer and longer
-// to load as memory pressure builds.
-app.MapGet("/api/catalog/{id}", async (string id, ILogger<Program> logger) =>
+// Opening a product page applies the running autumn campaign discount.
+app.MapGet("/api/catalog/{id}", IResult (string id, ILogger<Program> logger) =>
 {
+    if (!catalogSourceValid)
+    {
+        return CatalogSourceUnavailable(logger);
+    }
+
     var product = catalog.FirstOrDefault(p => p.Id == id);
     if (product is null)
     {
@@ -84,55 +123,85 @@ app.MapGet("/api/catalog/{id}", async (string id, ILogger<Program> logger) =>
     }
 
     logger.LogInformation("Opening product {ProductId} ({ProductName}).", product.Id, product.Name);
-    await AVeryMemoryIntensiveFunction(logger);
-    return Results.Ok(product);
+
+    var promoRate = Promotions.RatesByCategory[product.Category];
+    var promoPrice = Math.Round(product.Price * (1 - promoRate), 2);
+
+    return Results.Ok(new ProductDetail(
+        product.Id,
+        product.Name,
+        product.Price,
+        product.Category,
+        product.Description,
+        product.Emoji,
+        promoRate,
+        promoPrice));
 });
 
-// ── Health check ──────────────────────────────────────────────────────────────
+// ── Health ────────────────────────────────────────────────────────────────────
+// /api/health is the storefront-facing check: it always returns a JSON body the
+// UI can render, and switches to 503 when the app is misconfigured so the outage
+// shows up in AppRequests. /healthz stays a flat 200 for platform probes.
+app.MapGet("/api/health", IResult (ILogger<Program> logger) =>
+{
+    var payload = new
+    {
+        status = catalogSourceValid ? "healthy" : "unhealthy",
+        catalogSource,
+        expectedCatalogSource = SupportedCatalogSource,
+        productCount = catalogSourceValid ? catalog.Length : 0,
+        revision,
+        reason = catalogSourceValid
+            ? null
+            : $"CONFIG_ERROR CatalogSource='{catalogSource}' is not a supported provider; expected '{SupportedCatalogSource}'.",
+    };
+
+    if (!catalogSourceValid)
+    {
+        logger.LogError(
+            "Health check failed: CONFIG_ERROR CatalogSource='{CatalogSource}' on revision {Revision}; expected '{Expected}'.",
+            catalogSource,
+            revision,
+            SupportedCatalogSource);
+
+        return Results.Json(payload, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    return Results.Ok(payload);
+});
 
 app.MapGet("/healthz", () => Results.Ok("ok"));
 
-app.Logger.LogInformation("Zava backend started with {ProductCount} products in the catalog.", catalog.Length);
+app.Logger.LogInformation(
+    "Zava backend started on revision {Revision} with catalog source '{CatalogSource}' and {ProductCount} products.",
+    revision,
+    catalogSource,
+    catalog.Length);
 
 app.Run();
 
-// ── Memory leak ───────────────────────────────────────────────────────────────
-static async Task AVeryMemoryIntensiveFunction(ILogger logger)
-{
-    try
-    {
-        // Simulate a memory-intensive operation that allocates a large object.
-        await Task.Delay(100); // Simulate some processing time
-
-        var block = new byte[50_000_000]; // 50 MB per call, never released
-        // Touch every page with non-zero data so the memory is actually committed
-        // to physical RAM (RSS / WorkingSetBytes). A freshly allocated byte[] is
-        // zero-filled from a fresh mmap, so on Linux the pages stay mapped
-        // copy-on-write to the kernel's shared zero page and never count toward
-        // the container's memory metric until they are written to.
-        Array.Fill(block, (byte)0xFF);
-        LeakBucket.Items.Add(block);
-        var leakSize = LeakBucket.Items.Count;
-        logger.LogError("AVeryMemoryIntensiveFunction leak size={LeakSize}", leakSize);
-
-        // The service degrades as memory pressure builds: every leaked block adds
-        // latency, so each product page takes longer to open than the last.
-        var delay = TimeSpan.FromMilliseconds(Math.Min(500 * leakSize, 30_000));
-        logger.LogWarning("AVeryMemoryIntensiveFunction stalling request for {DelayMs} ms", delay.TotalMilliseconds);
-        await Task.Delay(delay);
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "An error occurred in AVeryMemoryIntensiveFunction.");
-        throw;
-    }
-}
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-static class LeakBucket
+// Autumn campaign discounts, keyed by catalog category.
+static class Promotions
 {
-    public static readonly List<byte[]> Items = [];
+    public static readonly Dictionary<string, decimal> RatesByCategory = new()
+    {
+        ["Dogs"] = 0.10m,
+        ["Cats"] = 0.10m,
+        ["Birds"] = 0.05m,
+        ["Fish"] = 0.05m,
+    };
 }
 
 record Product(string Id, string Name, decimal Price, string Category, string Description, string Emoji);
+
+record ProductDetail(
+    string Id,
+    string Name,
+    decimal Price,
+    string Category,
+    string Description,
+    string Emoji,
+    decimal PromoRate,
+    decimal PromoPrice);

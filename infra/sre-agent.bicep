@@ -1,6 +1,6 @@
 // ── SRE Agent module ─────────────────────────────────────────────────────────
 // Provisions the Azure SRE Agent, its managed identity + RBAC, the incident
-// Action Group, and the Zava OOM metric alert that drives the demo.
+// Action Group, and the two Azure Monitor alerts that drive the demo scenarios.
 
 @description('The location used for all resources.')
 param location string
@@ -15,13 +15,19 @@ param appInsightsAppId string
 @description('Application Insights connection string the agent uses to read telemetry.')
 param appInsightsConnectionString string
 
-@description('Resource ID of the Zava backend Container App the memory alert monitors.')
-param backendContainerAppId string
+param appInsightsResourceId string
+
+@description('Resource ID of the Log Analytics workspace the demo alerts query.')
+param logAnalyticsWorkspaceId string
 
 // ── Names ────────────────────────────────────────────────────────────────────
 var sreAgentName = 'sre-agent-${environmentName}'
 var sreAgentIdentityName = 'id-sre-agent-${environmentName}'
 var actionGroupName = 'ag-sre-agent-${environmentName}'
+// Response plans route on these names: 'app-exception' -> code-investigator,
+// 'availability' -> platform-operator. Keep the substrings non-overlapping.
+var appExceptionAlertName = 'alert-zava-app-exception-${environmentName}'
+var availabilityAlertName = 'alert-zava-availability-${environmentName}'
 
 // ── Built-in role IDs ────────────────────────────────────────────────────────
 var readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
@@ -98,8 +104,9 @@ resource appInsightsContributorAssignment 'Microsoft.Authorization/roleAssignmen
   }
 }
 
-// Container Apps Contributor on the resource group (scale/remediate the Zava
-// Container App, e.g. `az containerapp update --max-replicas 4`)
+// Container Apps Contributor on the resource group. This is what makes Scenario 2
+// possible: the agent repairs the backend's configuration with
+// `az containerapp update --set-env-vars CATALOG_SOURCE=builtin`.
 resource containerAppsContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(resourceGroup().id, sreAgentIdentity.id, containerAppsContributorRoleId)
   scope: resourceGroup()
@@ -126,7 +133,7 @@ resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
   name: sreAgentName
   location: location
   identity: {
-    type: 'UserAssigned'
+    type: 'SystemAssigned, UserAssigned'
     userAssignedIdentities: {
       '${sreAgentIdentity.id}': {}
     }
@@ -159,6 +166,12 @@ resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
       name: 'Automatic'
     }
 
+    #disable-next-line BCP037 // Supported by SRE Agent but missing from the published Bicep type.
+    experimentalSettings: {
+      EnableWorkspaceTools: true
+      EnableHttpTriggers: true
+      EnableV2AgentLoop: true
+    }
     incidentManagementConfiguration: {
       type: 'AzMonitor'
       connectionName: 'azmonitor'
@@ -169,78 +182,106 @@ resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
     name: 'app-insights'
     properties: {
       dataConnectorType: 'AppInsights'
+      #disable-next-line use-secure-value-for-secure-inputs // This data source is an ARM resource ID, not a secret.
       dataSource: appInsightsConnectionString
-      identity: sreAgentIdentity.id
-      extendedProperties: {}
+      extendedProperties: {
+        armResourceId: appInsightsResourceId
+        resource: {
+          name: last(split(appInsightsResourceId, '/'))
+        }
+        appId: appInsightsAppId
+      }
+      identity: 'system'
     }
   }
 }
 
-resource zavaMemoryAlert 'Microsoft.Insights/metricAlerts@2024-03-01-preview' = {
-  name: 'Zava backend memory alert'
-  location: 'global'
+// ── SRE Agent – GitHub integration (configured in the agent Builder) ─────────
+// GitHub is NOT wired up through a Microsoft.App/agents/connectors resource:
+// 'GitHub' is not a valid ARM dataConnectorType (valid types are Kusto, Mcp,
+// Outlook, Teams), so an ARM connector for it deploys but reports "Failed".
+//
+// Instead, configure GitHub via the agent Builder (data plane), per docs:
+//   • Code Access  (Builder > Code Access)  – source code reading / RCA
+//   • GitHub Connector (Builder > Connectors) – open issues, PRs, workflows
+// Both use the PAT from `azd env set GITHUB_PAT <token>` and the repository
+// from `azd env set GITHUB_REPOSITORY <owner/repo>`.
+
+// ── Alerts ─────────────────────────────────
+// Two symptom-specific alerts, one per demo scenario. Descriptions stay
+// symptom-only on purpose: the agent should investigate the evidence rather
+// than read the root cause out of the alert text.
+//
+// skipQueryValidation is required because AppExceptions / AppRequests do not
+// exist in a brand-new workspace until the app has sent its first telemetry.
+
+// Scenario 1 – code fault. Unhandled exceptions surface as HTTP 500s.
+// Not remediable from the platform; the agent files a GitHub issue.
+resource zavaAppExceptionAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
+  name: appExceptionAlertName
+  location: location
   properties: {
-    description: 'Zava backend memory > 500 MiB - OOM pressure detected.'
+    displayName: appExceptionAlertName
+    description: 'Zava storefront is returning HTTP 500 errors on product pages. Unhandled exceptions are being recorded by the backend.'
     severity: 2
     enabled: true
-    scopes: [backendContainerAppId]
-    evaluationFrequency: 'PT1M'
+    scopes: [logAnalyticsWorkspaceId]
+    evaluationFrequency: 'PT5M'
     windowSize: 'PT5M'
+    skipQueryValidation: true
+    autoMitigate: true
     criteria: {
-      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
       allOf: [
         {
-          name: 'HighMemoryUsage'
-          metricNamespace: 'Microsoft.App/containerApps'
-          metricName: 'WorkingSetBytes'
-          operator: 'GreaterThanOrEqual'
-          threshold: 524288000 // 500 MiB in bytes
-          timeAggregation: 'Average'
-          criterionType: 'StaticThresholdCriterion'
+          query: 'AppExceptions | where AppRoleName startswith "ca-zava-backend"'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
         }
       ]
     }
-    actions: [
-      {
-        actionGroupId: sreAgentActionGroup.id
-      }
-    ]
+    actions: {
+      actionGroups: [sreAgentActionGroup.id]
+    }
   }
 }
 
-// ── Metric Alert – Zava backend latency ───────────────────────────────────────
-// Fires when the backend's average HTTP response time exceeds 200 ms, which the
-// AVeryMemoryIntensiveFunction leak causes as memory pressure builds (each
-// leaked block adds request latency).
-resource zavaResponseTimeAlert 'Microsoft.Insights/metricAlerts@2024-03-01-preview' = {
-  name: 'Zava backend latency alert'
-  location: 'global'
+// Scenario 2 – platform fault. The catalog routes return HTTP 503.
+// Not remediable from code; the agent fixes the Container App configuration.
+resource zavaAvailabilityAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
+  name: availabilityAlertName
+  location: location
   properties: {
-    description: 'Zava backend average response time > 200 ms - latency degradation detected.'
-    severity: 3
+    displayName: availabilityAlertName
+    description: 'Zava storefront catalog is unavailable. The backend is returning HTTP 503 to customer requests.'
+    severity: 1
     enabled: true
-    scopes: [backendContainerAppId]
-    evaluationFrequency: 'PT1M'
+    scopes: [logAnalyticsWorkspaceId]
+    evaluationFrequency: 'PT5M'
     windowSize: 'PT5M'
+    skipQueryValidation: true
+    autoMitigate: true
     criteria: {
-      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
       allOf: [
         {
-          name: 'HighResponseTime'
-          metricNamespace: 'Microsoft.App/containerApps'
-          metricName: 'ResponseTime'
+          query: 'AppRequests | where AppRoleName startswith "ca-zava-backend" | where ResultCode == "503"'
+          timeAggregation: 'Count'
           operator: 'GreaterThan'
-          threshold: 200 // milliseconds
-          timeAggregation: 'Average'
-          criterionType: 'StaticThresholdCriterion'
+          threshold: 3
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
         }
       ]
     }
-    actions: [
-      {
-        actionGroupId: sreAgentActionGroup.id
-      }
-    ]
+    actions: {
+      actionGroups: [sreAgentActionGroup.id]
+    }
   }
 }
 

@@ -12,6 +12,60 @@ interface Product {
 
 type View = "catalog" | "product" | "basket";
 
+interface HealthPayload {
+  status: string;
+  productCount: number;
+  revision: string;
+  reason: string | null;
+}
+
+type HealthState =
+  | { kind: "unknown" }
+  | { kind: "up"; productCount: number; revision: string; latencyMs: number }
+  | { kind: "down"; httpStatus: number | null; reason: string };
+
+interface RequestFailure {
+  path: string;
+  status: number | null;
+}
+
+const HEALTH_POLL_MS = 5000;
+
+// The banner is the demo's scoreboard: a total outage (health probe failing) outranks
+// individual request failures, which in turn outrank the healthy state.
+function describeStatus(health: HealthState, failure: RequestFailure | null) {
+  if (health.kind === "down") {
+    return {
+      tone: "down",
+      label: "SERVICE DISRUPTION",
+      detail: health.httpStatus
+        ? `HTTP ${health.httpStatus} · ${health.reason}`
+        : health.reason,
+    };
+  }
+  if (failure) {
+    return {
+      tone: "degraded",
+      label: "DEGRADED",
+      detail: failure.status
+        ? `HTTP ${failure.status} on ${failure.path}`
+        : `Request to ${failure.path} failed`,
+    };
+  }
+  if (health.kind === "up") {
+    return {
+      tone: "up",
+      label: "ALL SYSTEMS OPERATIONAL",
+      detail: `${health.productCount} products · ${health.latencyMs} ms · revision ${health.revision}`,
+    };
+  }
+  return {
+    tone: "unknown",
+    label: "CHECKING STATUS",
+    detail: "Contacting the Zava backend…",
+  };
+}
+
 export default function App() {
   const [catalog, setCatalog] = useState<Product[]>([]);
   const [basket, setBasket] = useState<Record<string, number>>({});
@@ -20,28 +74,96 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<Product | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [health, setHealth] = useState<HealthState>({ kind: "unknown" });
+  const [failure, setFailure] = useState<RequestFailure | null>(null);
+
+  // Poll the backend health endpoint so the banner reflects the live state of the
+  // service, not just the last thing the shopper clicked.
+  useEffect(() => {
+    let cancelled = false;
+
+    const probe = async () => {
+      const started = performance.now();
+      try {
+        const res = await fetch("/api/health");
+        const latencyMs = Math.round(performance.now() - started);
+        const body = (await res.json().catch(() => null)) as HealthPayload | null;
+        if (cancelled) return;
+
+        if (res.ok && body?.status === "healthy") {
+          setHealth({
+            kind: "up",
+            productCount: body.productCount,
+            revision: body.revision,
+            latencyMs,
+          });
+        } else {
+          setHealth({
+            kind: "down",
+            httpStatus: res.status,
+            reason: body?.reason ?? `Backend returned HTTP ${res.status}.`,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setHealth({ kind: "down", httpStatus: null, reason: "Backend unreachable." });
+        }
+      }
+    };
+
+    probe();
+    const timer = window.setInterval(probe, HEALTH_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   // Fetch the catalog once on load.
   useEffect(() => {
-    setLoading(true);
-    fetch("/api/catalog")
-      .then((r) => r.json())
-      .then((data: Product[]) => setCatalog(data))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    let cancelled = false;
+
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await fetch("/api/catalog");
+        if (cancelled) return;
+        if (!res.ok) {
+          setFailure({ path: "/api/catalog", status: res.status });
+          return;
+        }
+        setCatalog((await res.json()) as Product[]);
+        setFailure(null);
+      } catch {
+        if (!cancelled) setFailure({ path: "/api/catalog", status: null });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Opening a product hits the slow backend endpoint (the SRE demo bug):
-  // the more products you open, the longer this takes to respond.
-  const openProduct = (id: string) => {
+  const openProduct = async (id: string) => {
+    const path = `/api/catalog/${id}`;
     setDetail(null);
     setDetailLoading(true);
     setView("product");
-    fetch(`/api/catalog/${id}`)
-      .then((r) => r.json())
-      .then((data: Product) => setDetail(data))
-      .catch(console.error)
-      .finally(() => setDetailLoading(false));
+    try {
+      const res = await fetch(path);
+      if (!res.ok) {
+        setFailure({ path, status: res.status });
+        return;
+      }
+      setDetail((await res.json()) as Product);
+      setFailure(null);
+    } catch {
+      setFailure({ path, status: null });
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const addToBasket = (id: string) =>
@@ -71,33 +193,45 @@ export default function App() {
 
   const total = basketItems.reduce((s, i) => s + i.price * i.quantity, 0);
   const basketCount = Object.values(basket).reduce((s, v) => s + v, 0);
+  const status = describeStatus(health, failure);
 
   return (
     <div className="app">
-      <header className="header">
-        <div className="brand">
-          <span className="brand-logo">🐾</span>
-          <div>
-            <h1>Zava Pet Store</h1>
-            <p className="tagline">Everything your best friend needs</p>
-          </div>
+      <div className="topbar">
+        <div className={`status-bar status-${status.tone}`}>
+          <span className="status-dot" />
+          <strong className="status-label">{status.label}</strong>
+          <span className="status-detail">{status.detail}</span>
+          {(status.tone === "down" || status.tone === "degraded") && (
+            <span className="status-hint">SRE Agent investigating</span>
+          )}
         </div>
-        <nav className="nav">
-          <button
-            className={view === "catalog" ? "nav-btn active" : "nav-btn"}
-            onClick={() => setView("catalog")}
-          >
-            Shop
-          </button>
-          <button
-            className={view === "basket" ? "nav-btn active" : "nav-btn"}
-            onClick={() => setView("basket")}
-          >
-            🛒 Basket
-            {basketCount > 0 && <span className="badge">{basketCount}</span>}
-          </button>
-        </nav>
-      </header>
+
+        <header className="header">
+          <div className="brand">
+            <span className="brand-logo">🐾</span>
+            <div>
+              <h1>Zava Pet Store</h1>
+              <p className="tagline">Everything your best friend needs</p>
+            </div>
+          </div>
+          <nav className="nav">
+            <button
+              className={view === "catalog" ? "nav-btn active" : "nav-btn"}
+              onClick={() => setView("catalog")}
+            >
+              Shop
+            </button>
+            <button
+              className={view === "basket" ? "nav-btn active" : "nav-btn"}
+              onClick={() => setView("basket")}
+            >
+              🛒 Basket
+              {basketCount > 0 && <span className="badge">{basketCount}</span>}
+            </button>
+          </nav>
+        </header>
+      </div>
 
       <main className="main">
         {view === "catalog" && (
@@ -158,9 +292,6 @@ export default function App() {
               <div className="detail-loading">
                 <span className="spinner" />
                 <p>Loading product…</p>
-                <p className="muted">
-                  This can take a while when the store is busy.
-                </p>
               </div>
             ) : detail ? (
               <div className="detail-card">
