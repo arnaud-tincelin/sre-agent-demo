@@ -11,6 +11,8 @@ scenarios you can run in front of an audience.
 The storefront carries a status banner, so the audience watches it go amber or red and back to
 green without reading a single log line.
 
+[![Watch the video](./SRE%20Agent.mp4)](./SRE%20Agent.mp4)
+
 ## 1. Prerequisites
 
 - Azure CLI and Azure Developer CLI, both signed in (`az login` **and** `azd auth login`)
