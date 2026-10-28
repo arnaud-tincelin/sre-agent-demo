@@ -3,9 +3,8 @@
 # SRE Agent ↔ GitHub connection.
 #
 # Wired into azd via the `preprovision` hook in azure.yaml. It runs *before*
-# infra/main.bicep and persists values with `azd env set`, so the Bicep
-# `githubPat` / `githubRepository` parameters are populated automatically
-# (see infra/main.parameters.json).
+# Bicep or Terraform provisioning and persists values with `azd env set`, so
+# post-provision.sh can configure Code Access using the same azd environment.
 #
 # GitHub does not allow minting a classic PAT non-interactively, so this uses
 # the GitHub CLI (`gh`) OAuth session to obtain a usable token. If gh is not

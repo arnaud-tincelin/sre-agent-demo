@@ -9,3 +9,11 @@ obj/
 # Node / React
 node_modules/
 dist/
+
+# Deployment environments, credentials and Terraform state
+.azure/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log

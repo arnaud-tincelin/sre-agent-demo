@@ -3,7 +3,7 @@
 name: sre-agent-demo
 infra:
   provider: bicep
-  path: infra
+  path: bicep/infra
 
 services:
   zava-backend:

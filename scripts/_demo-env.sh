@@ -10,7 +10,7 @@ fi
 
 if [ -z "${AZURE_RESOURCE_GROUP:-}" ] || [ -z "${AZURE_ENV_NAME:-}" ]; then
   echo "ERROR: AZURE_RESOURCE_GROUP and AZURE_ENV_NAME are not set." >&2
-  echo "       Run this from the repository root after 'azd up', or export them manually." >&2
+  echo "       Run this from your bicep/ or terraform/ azd project directory after 'azd up', or export them manually." >&2
   exit 1
 fi
 

@@ -8,6 +8,9 @@ param location string
 @description('The azd environment name.')
 param environmentName string
 
+@description('The deployment principal that configures the agent data plane.')
+param principalId string
+
 @description('Application Insights AppId the agent uses for log-to-code investigations.')
 param appInsightsAppId string
 
@@ -193,6 +196,15 @@ resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
       }
       identity: 'system'
     }
+  }
+}
+
+resource deployerAgentAdministrator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(sreAgent.id, principalId, 'e79298df-d852-4c6d-84f9-5d13249d1e55')
+  scope: sreAgent
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'e79298df-d852-4c6d-84f9-5d13249d1e55')
+    principalId: principalId
   }
 }
 

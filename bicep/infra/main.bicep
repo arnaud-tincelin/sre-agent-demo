@@ -4,6 +4,9 @@ param location string = resourceGroup().location
 @description('The azd environment name.')
 param environmentName string
 
+@description('The deployment principal that configures the agent data plane.')
+param principalId string
+
 @description('Set by azd. True once the backend container app has been deployed at least once.')
 param zavaBackendExists bool = false
 
@@ -237,6 +240,7 @@ module sreAgent 'sre-agent.bicep' = {
   params: {
     location: location
     environmentName: environmentName
+    principalId: principalId
     appInsightsAppId: appInsights.properties.AppId
     appInsightsConnectionString: appInsights.properties.ConnectionString
     logAnalyticsWorkspaceId: logAnalyticsWorkspace.id

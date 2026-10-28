@@ -110,10 +110,16 @@ exception — they *do* key on the container name.
 Azure. The old `alert-zava-oom-*` metric alert kept dispatching to the action group after it
 was removed from `sre-agent.bicep` and had to be deleted by hand.
 
-**`infra/fetch-container-image.bicep` exists because `azd provision` alone would otherwise
+**`bicep/infra/fetch-container-image.bicep` exists because `azd provision` alone would otherwise
 reset both container apps to the placeholder image** in `main.bicep`, silently replacing the
 demo app with `containerapps-helloworld`. It reads the running image back via the
 `SERVICE_*_RESOURCE_EXISTS` parameters azd sets.
+
+**Deployment entry points are `bicep/azure.yaml` and `terraform/azure.yaml`.** Run azd
+from the chosen directory so hooks and demo scripts resolve the right environment.
+Both reuse root-level `src/`, `scripts/`, and `sre-config/`. The root `azure.yaml` remains
+a Bicep compatibility entry point. Terraform uses AzureRM resources plus AzAPI for the
+preview SRE Agent API, and ignores only Container App image drift owned by azd.
 
 **The alerts set `skipQueryValidation`** because `AppExceptions` and `AppRequests` do not
 exist in a brand-new workspace until the app has sent its first telemetry, which would

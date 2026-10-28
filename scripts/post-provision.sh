@@ -16,6 +16,11 @@
 
 set -euo pipefail
 
+# Native Windows jq otherwise emits CRLF into Bash paths and API names.
+if [ "${OS:-}" = "Windows_NT" ]; then
+  jq() { command jq --binary "$@"; }
+fi
+
 # ── Guard ─────────────────────────────────────────────────────────────────────
 if [ -z "${AZURE_RESOURCE_GROUP:-}" ] || [ -z "${AZURE_SUBSCRIPTION_ID:-}" ] || [ -z "${AZURE_ENV_NAME:-}" ]; then
   echo "Skipping SRE Agent configuration: azd environment variables are not available."
@@ -39,9 +44,9 @@ AGENT_ENDPOINT=$(az rest \
   --output tsv 2>/dev/null || true)
 
 if [ -z "${AGENT_ENDPOINT}" ]; then
-  echo "WARNING: Could not resolve SRE Agent endpoint. Skipping data-plane configuration."
+  echo "ERROR: Could not resolve SRE Agent endpoint."
   echo "  The agent resource may still be provisioning, or the preview API version may have changed."
-  exit 0
+  exit 1
 fi
 
 echo "  Agent endpoint: ${AGENT_ENDPOINT}"
@@ -54,6 +59,11 @@ TOKEN=$(az account get-access-token \
   --output tsv)
 
 AUTH_HEADER="Authorization: Bearer ${TOKEN}"
+
+# Fail before writing anything if authorization is missing or the endpoint serves HTML.
+curl --fail-with-body --silent --show-error \
+  "${AGENT_ENDPOINT}/api/v2/extendedAgent/skills" -H "${AUTH_HEADER}" \
+  | jq -e '(.value | type) == "array"' >/dev/null
 
 # ── 0. Connect source code (Code Access) ──────────────────────────────────────
 # Gives the agent read access to the repo so it can do root-cause analysis with
@@ -109,6 +119,9 @@ if [ ! -f "${CONFIG_FILE}" ]; then
 fi
 
 STAGE_DIR="$(mktemp -d)"
+if command -v cygpath >/dev/null 2>&1; then
+  STAGE_DIR="$(cygpath -m "${STAGE_DIR}")"
+fi
 trap 'rm -rf "${STAGE_DIR}"' EXIT
 
 # ${GITHUB_REPO} and ${RG} are the only placeholders allowed in sre-config markdown.
@@ -137,14 +150,14 @@ while IFS= read -r rel; do
 done < <(jq -r '.knowledgeBase[]' "${CONFIG_FILE}")
 
 if [ ${#KB_ARGS[@]} -gt 0 ]; then
-  KB_STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+  KB_STATUS=$(curl --silent --show-error -o /dev/null -w '%{http_code}' \
     -X POST "${AGENT_ENDPOINT}/api/v1/AgentMemory/upload" \
     -H "${AUTH_HEADER}" \
     -F "triggerIndexing=true" \
     "${KB_ARGS[@]}" || echo "000")
   case "${KB_STATUS}" in
     200 | 201 | 202) echo "  uploaded, indexing." ;;
-    *) echo "  WARNING: knowledge base upload returned HTTP ${KB_STATUS}." ;;
+    *) echo "  ERROR: knowledge base upload returned HTTP ${KB_STATUS}."; exit 1 ;;
   esac
 fi
 
@@ -340,15 +353,16 @@ echo "  Subagents:"
 # The subagent API accepts unknown tool names silently, so a stale or misspelled
 # name becomes a capability the subagent simply never has. Cross-check the grants
 # against the live roster instead of trusting the create call's 200.
-ROSTER=$(curl -s "${AGENT_ENDPOINT}/api/v2/agent/tools" -H "${AUTH_HEADER}")
-curl -s "${AGENT_ENDPOINT}/api/v2/extendedAgent/agents" -H "${AUTH_HEADER}" \
-  | jq -r --argjson roster "${ROSTER}" '
-      ($roster.data | map(.name)) as $known
+curl --fail-with-body --silent --show-error \
+  "${AGENT_ENDPOINT}/api/v2/agent/tools" -H "${AUTH_HEADER}" -o "${STAGE_DIR}/tools.json"
+curl --fail-with-body --silent --show-error "${AGENT_ENDPOINT}/api/v2/extendedAgent/agents" -H "${AUTH_HEADER}" \
+  | jq -r --slurpfile roster "${STAGE_DIR}/tools.json" '
+      ($roster[0].data | map(.name)) as $known
       | .value[]?
       | .properties.tools as $t
       | ($t - $known) as $phantom
       | "    \(.name) tools=\($t | length) phantom=\(if ($phantom | length) == 0 then "none" else ($phantom | join(",")) end) azureWrite=\($t | index("RunAzCliWriteCommands") != null) terminal=\($t | index("RunInTerminal") != null)"
-    ' || echo "    (unavailable)"
+    '
 
 echo "  Response plans:"
 curl -s "${AGENT_ENDPOINT}/api/v2/extendedAgent/incidentFilters" -H "${AUTH_HEADER}" \

@@ -1,0 +1,2 @@
+*.sh text eol=lf
+sre-config/** text eol=lf
