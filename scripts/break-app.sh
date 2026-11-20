@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# break-app.sh - Scenario 1: exercise the latent code defect.
+# break-app.sh - Scenario 1: exercise the code defect on a pre-fix deployment.
 #
-# The defect is always present in the deployed image; it only triggers on product
+# On an affected revision, the defect only triggers on product
 # pages in one catalog category. Clicking one of those products in the storefront
 # is enough to see the HTTP 500, but the alert needs a few failures in its
 # evaluation window - this generates them.
 #
-# There is nothing to reset: the fault lives in source, not in configuration.
+# Redeploy the current version to restore the affected product pages.
 
 set -euo pipefail
 
@@ -22,5 +22,5 @@ for id in $(seq 1 "${REQUESTS}"); do
 done
 
 echo
-echo "The storefront banner turns amber. The '${APP_EXCEPTION_ALERT}' alert fires"
-echo "within about 5-10 minutes and the code-investigator subagent opens a GitHub issue."
+echo "On an affected revision, HTTP 500 responses turn the banner amber and can trigger"
+echo "the '${APP_EXCEPTION_ALERT}' alert within about 5-10 minutes."

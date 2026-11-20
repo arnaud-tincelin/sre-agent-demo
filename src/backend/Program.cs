@@ -124,7 +124,7 @@ app.MapGet("/api/catalog/{id}", IResult (string id, ILogger<Program> logger) =>
 
     logger.LogInformation("Opening product {ProductId} ({ProductName}).", product.Id, product.Name);
 
-    var promoRate = Promotions.RatesByCategory[product.Category];
+    var promoRate = Promotions.RatesByCategory.GetValueOrDefault(product.Category, 0m);
     var promoPrice = Math.Round(product.Price * (1 - promoRate), 2);
 
     return Results.Ok(new ProductDetail(
