@@ -1,7 +1,7 @@
 # sre-agent-demo
 
 An Azure SRE Agent operating a small e-commerce storefront called **Zava**, with two break/fix
-scenarios you can run in front of an audience.
+scenarios. Scenario 1 requires a pre-fix deployment; Scenario 2 runs on the current version.
 
 |                         | Scenario 1                                          | Scenario 2                                            |
 | ----------------------- | --------------------------------------------------- | ----------------------------------------------------- |
@@ -143,8 +143,10 @@ Browse to the URL `azd up` printed. The banner should read **ALL SYSTEMS OPERATI
 
 ## 4. Scenario 1 — troubleshoot and file a GitHub issue
 
-The defect already ships in the app and only fires on the **Small** pets category. Click one of
-those products, or generate enough failures to trip the alert:
+The current app serves **Small** pet products at their regular price when no promotion is
+configured. To reproduce the original HTTP 500, use a demo deployment of the
+[pre-fix revision](https://github.com/arnaud-tincelin/sre-agent-demo/tree/d2645d0).
+On that deployment, click one of those products, or generate enough failures to trip the alert:
 
 ```bash
 bash ../scripts/break-app.sh
@@ -154,7 +156,7 @@ The banner turns amber. Watch the agent at [sre.azure.com](https://sre.azure.com
 Activities → Incidents: it queries the telemetry, follows the stack trace into `Program.cs`,
 and opens a GitHub issue naming the exact line — without touching any Azure resource.
 
-Nothing to reset. The fault lives in source, so the scenario repeats as-is.
+Redeploy the current version to restore the affected product pages.
 
 ## 5. Scenario 2 — fix an Azure resource
 
